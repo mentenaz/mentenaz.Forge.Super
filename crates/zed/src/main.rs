@@ -1028,11 +1028,13 @@ fn main() {
 
         cx.activate(true);
 
-        cx.spawn({
-            let client = app_state.client.clone();
-            async move |cx| authenticate(client, cx).await
-        })
-        .detach_and_log_err(cx);
+        // Forge doesn't operate Zed's hosted account/collaboration service,
+        // so startup doesn't auto-reconnect to it even when stored
+        // credentials exist (e.g. migrated from an old Zed/ForgeDev
+        // install). `authenticate` itself is untouched — it stays reachable
+        // through the title bar's Sign In button once TitleBarSettings's
+        // show_sign_in is re-enabled, or a Forge-hosted equivalent lands.
+        let _ = authenticate;
 
         let urls: Vec<_> = args
             .paths_or_urls

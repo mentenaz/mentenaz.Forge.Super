@@ -679,7 +679,7 @@ fn render_zed_agent_button(user_store: &Entity<UserStore>, cx: &mut App) -> impl
         })
 }
 
-fn render_ai_section(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoElement {
+fn render_ai_section(_user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoElement {
     let registry_agents = AgentRegistryStore::try_global(cx)
         .map(|store| store.read(cx).agents().to_vec())
         .unwrap_or_default();
@@ -689,16 +689,15 @@ fn render_ai_section(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoE
         .get::<AllAgentServersSettings>(None)
         .clone();
 
-    let column_count = 1 + FEATURED_AGENT_IDS.len() as u16;
+    // Forge doesn't operate Zed's hosted account/billing service, so the
+    // onboarding grid skips the "Zed Agent" sign-in/trial button rather than
+    // offering a flow this fork can't fulfill. render_zed_agent_button stays
+    // in place, unused, in case a Forge-hosted equivalent replaces it later.
+    let _ = render_zed_agent_button;
+    let column_count = FEATURED_AGENT_IDS.len() as u16;
 
     let grid = FEATURED_AGENT_IDS.iter().fold(
-        div()
-            .w_full()
-            .mt_1p5()
-            .grid()
-            .grid_cols(column_count)
-            .gap_2()
-            .child(render_zed_agent_button(user_store, cx)),
+        div().w_full().mt_1p5().grid().grid_cols(column_count).gap_2(),
         |grid, agent_id| {
             let Some(agent) = registry_agents
                 .iter()
