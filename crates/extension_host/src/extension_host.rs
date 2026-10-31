@@ -816,7 +816,7 @@ impl ExtensionStore {
         query: &[(&str, &str)],
         cx: &mut Context<ExtensionStore>,
     ) -> Task<Result<Vec<ExtensionMetadata>>> {
-        let url = self.http_client.build_zed_api_url(path, query);
+        let url = self.http_client.build_forge_extensions_url(path, query);
         let http_client = self.http_client.clone();
         cx.spawn(async move |_, _| {
             let mut response = http_client
@@ -980,7 +980,7 @@ impl ExtensionStore {
 
         let Some(url) = self
             .http_client
-            .build_zed_api_url(
+            .build_forge_extensions_url(
                 &format!("/extensions/{extension_id}/download"),
                 &[
                     ("min_schema_version", &schema_versions.start().to_string()),
@@ -1025,7 +1025,7 @@ impl ExtensionStore {
         log::info!("installing extension {extension_id} {version}");
         let Some(url) = self
             .http_client
-            .build_zed_api_url(
+            .build_forge_extensions_url(
                 &format!("/extensions/{extension_id}/{version}/download"),
                 &[],
             )

@@ -289,6 +289,24 @@ impl HttpClientWithUrl {
         )?)
     }
 
+    /// Builds a Forge extension registry URL using the given path.
+    ///
+    /// Separate from `build_zed_api_url` on purpose: that one is shared by
+    /// unrelated callers (telemetry events, edit-prediction experiments)
+    /// that should keep going to Zed's own `api.zed.dev`. Only the
+    /// extension registry (crates/extension_host) is rerouted to Forge's
+    /// own registry, which mirrors api.zed.dev's /extensions* shape — see
+    /// H:\Persornal\Mentenaz_forge\@mentenaz\Forge_LandingPage\src\app\api\registry
+    /// and E:\mentenaz\extensions's registry-sync.yml, which populates it.
+    pub fn build_forge_extensions_url(&self, path: &str, query: &[(&str, &str)]) -> Result<Url> {
+        const FORGE_REGISTRY_BASE_URL: &str = "https://forge.mentenaz-server.com/api/registry";
+
+        Ok(Url::parse_with_params(
+            &format!("{FORGE_REGISTRY_BASE_URL}{path}"),
+            query,
+        )?)
+    }
+
     /// Builds a Zed Cloud URL using the given path.
     pub fn build_zed_cloud_url(&self, path: &str) -> Result<Url> {
         let base_url = self.base_url();
