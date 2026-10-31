@@ -1575,7 +1575,10 @@ pub fn set_completion_provider(fs: Arc<dyn Fs>, cx: &mut App, provider: EditPred
 pub fn get_available_providers(cx: &mut App) -> Vec<EditPredictionProvider> {
     let mut providers = Vec::new();
 
-    providers.push(EditPredictionProvider::Zed);
+    // Not offered: Forge doesn't operate Zed's hosted edit-prediction
+    // service (EditPredictionStore::send_predict_edits_request is disabled
+    // for the same reason). Will be implemented at a later stage against a
+    // Forge-hosted backend.
 
     let app_state = workspace::AppState::global(cx);
     if copilot::GlobalCopilotAuth::try_get_or_init(app_state, cx)

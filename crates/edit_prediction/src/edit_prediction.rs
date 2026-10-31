@@ -9,16 +9,14 @@ use cloud_api_types::{
     SubmitEditPredictionSettledBatchBody, SubmitEditPredictionSettledResponse,
 };
 use cloud_llm_client::predict_edits_v3::{
-    PREDICT_EDITS_MODE_HEADER_NAME, PREDICT_EDITS_REQUEST_ID_HEADER_NAME,
-    PREDICT_EDITS_TRIGGER_HEADER_NAME, PredictEditsMode, PredictEditsV3Request,
-    PredictEditsV3Response, RawCompletionRequest, RawCompletionResponse,
+    PredictEditsMode, PredictEditsV3Request, PredictEditsV3Response, RawCompletionRequest,
+    RawCompletionResponse,
 };
 use cloud_llm_client::predict_edits_v4::{PredictEditsV4Request, PredictEditsV4Response};
 use cloud_llm_client::{
     EditPredictionRejectReason, EditPredictionRejection,
     MAX_EDIT_PREDICTION_REJECTIONS_PER_REQUEST, MINIMUM_REQUIRED_VERSION_HEADER_NAME,
-    PREFERRED_EXPERIMENT_HEADER_NAME, PredictEditsRequestTrigger, RejectEditPredictionsBodyRef,
-    ZED_VERSION_HEADER_NAME,
+    PredictEditsRequestTrigger, RejectEditPredictionsBodyRef, ZED_VERSION_HEADER_NAME,
 };
 use collections::{HashMap, HashSet};
 use copilot::{Copilot, Reinstall};
@@ -3039,49 +3037,33 @@ impl EditPredictionStore {
         .await
     }
 
+    /// Disabled: this sent predict_edits requests to Zed's hosted
+    /// cloud.zed.dev service (via `build_zed_llm_url`), which Forge doesn't
+    /// operate. Will be implemented at a later stage against a
+    /// Forge-hosted edit-prediction backend. The `EditPredictionProvider::Zed`
+    /// option is hidden from settings so this path can't be reached from the
+    /// UI; it only remains reachable by a provider that infers a Zeta-style
+    /// prompt format for a custom Ollama/OpenAI-compatible server, which is
+    /// unaffected by this and still goes through send_custom_server_request.
     async fn send_predict_edits_request<Req, Res>(
-        path: &str,
-        request: Req,
-        preferred_experiment: Option<String>,
-        client: Arc<Client>,
-        llm_token: LlmApiToken,
-        organization_id: Option<OrganizationId>,
-        app_version: Version,
-        trigger: PredictEditsRequestTrigger,
-        mode: PredictEditsMode,
+        _path: &str,
+        _request: Req,
+        _preferred_experiment: Option<String>,
+        _client: Arc<Client>,
+        _llm_token: LlmApiToken,
+        _organization_id: Option<OrganizationId>,
+        _app_version: Version,
+        _trigger: PredictEditsRequestTrigger,
+        _mode: PredictEditsMode,
     ) -> Result<(Res, Option<EditPredictionUsage>)>
     where
         Req: serde::Serialize,
         Res: serde::de::DeserializeOwned,
     {
-        let url = client.http_client().build_zed_llm_url(path, &[])?;
-        let request_id = uuid::Uuid::new_v4().to_string();
-
-        let json_bytes = serde_json::to_vec(&request)?;
-        let compressed = zstd::encode_all(&json_bytes[..], 3)?;
-
-        Self::send_api_request(
-            |builder| {
-                let builder = builder
-                    .uri(url.as_ref())
-                    .header("Content-Encoding", "zstd")
-                    .header(PREDICT_EDITS_MODE_HEADER_NAME, mode.as_ref())
-                    .header(PREDICT_EDITS_REQUEST_ID_HEADER_NAME, request_id.as_str())
-                    .header(PREDICT_EDITS_TRIGGER_HEADER_NAME, trigger.as_ref());
-                let builder = if let Some(preferred_experiment) = preferred_experiment.as_deref() {
-                    builder.header(PREFERRED_EXPERIMENT_HEADER_NAME, preferred_experiment)
-                } else {
-                    builder
-                };
-                let req = builder.body(compressed.clone().into());
-                Ok(req?)
-            },
-            client,
-            llm_token,
-            organization_id,
-            app_version,
+        anyhow::bail!(
+            "Zed-hosted edit prediction is disabled in this fork; select a different \
+             edit prediction provider."
         )
-        .await
     }
 
     async fn send_api_request<Res>(
