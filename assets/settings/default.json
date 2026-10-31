@@ -1788,7 +1788,9 @@
     // Send debug info like crash reports.
     "diagnostics": true,
     // Send anonymized usage data like what languages you're using Zed with.
-    "metrics": true,
+    // Off by default: this fork doesn't report usage to Zed's servers
+    // unless you opt back in.
+    "metrics": false,
     // Allow sending requests to Anthropic models that cannot be offered with
     // Zero Data Retention
     "anthropic_retention": false,
