@@ -241,6 +241,53 @@ jobs:
       - name: Build the .deb package (script/bundle-deb)
         run: ./script/bundle-deb ${{ needs.prepare.outputs.architecture }}
 
+      # Publishes an actual `apt`-installable repository at
+      # downloads.mentenaz-server.com, separate from the raw .deb already
+      # uploaded as a workflow artifact / attached to the GitHub release.
+      # aptly builds the repo fresh each run (dists/, pool/, a GPG-signed
+      # Release) from just this run's .deb — it doesn't carry history
+      # forward from previous runs, so the published repo always serves
+      # only the latest version per architecture. Older versions stay
+      # downloadable via GitHub Releases, just not through `apt` itself.
+      - name: Publish the apt repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
+          GPG_FPR="42E9F3A7505F1AAD3DA6DCDFF128FBB1B8210F56"
+
+          curl -fsSL -o /tmp/aptly.tar.gz \
+            https://github.com/aptly-dev/aptly/releases/download/v1.6.1/aptly_1.6.1_linux_amd64.tar.gz
+          tar -xzf /tmp/aptly.tar.gz -C /tmp
+          APTLY=/tmp/aptly_1.6.1_linux_amd64/aptly
+
+          "$APTLY" repo create -distribution="stable" -component="main" forge-super
+          "$APTLY" repo add forge-super target/release/*.deb
+          "$APTLY" publish repo -batch -gpg-key="$GPG_FPR" forge-super
+
+          # The public half of the signing key, for users to import before
+          # adding the repo — see docs/src/linux.md for the sources.list
+          # line and import command this pairs with.
+          gpg --export --armor "$GPG_FPR" > ~/.aptly/public/mentenaz.gpg
+
+      - name: Deploy the apt repository to downloads.mentenaz-server.com
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.AFRIHOST_FTP_HOST }}
+          username: ${{ secrets.AFRIHOST_FTP_USERNAME }}
+          password: ${{ secrets.AFRIHOST_FTP_PASSWORD }}
+          protocol: ftps
+          local-dir: /home/runner/.aptly/public/
+          server-dir: /
+          # false (the default) only uploads what changed and never
+          # deletes remote files missing locally — important since
+          # local-dir only ever contains this run's dists/, pool/, and the
+          # exported key, not the whole history; a clean-slate sync would
+          # wipe anything else already on the subdomain.
+          dangerous-clean-slate: false
+
       - name: Upload artifact — Forge Super (tarball)
         uses: actions/upload-artifact@v4
         with:
