@@ -283,6 +283,7 @@ jobs:
           username: ${{ secrets.AFRIHOST_FTP_USERNAME }}
           password: ${{ secrets.AFRIHOST_FTP_PASSWORD }}
           protocol: ftps
+          port: 21
           local-dir: /home/runner/.aptly/public/
           server-dir: /
           # false (the default) only uploads what changed and never
