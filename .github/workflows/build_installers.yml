@@ -258,10 +258,14 @@ jobs:
           echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
           GPG_FPR="42E9F3A7505F1AAD3DA6DCDFF128FBB1B8210F56"
 
-          curl -fsSL -o /tmp/aptly.tar.gz \
-            https://github.com/aptly-dev/aptly/releases/download/v1.6.1/aptly_1.6.1_linux_amd64.tar.gz
-          tar -xzf /tmp/aptly.tar.gz -C /tmp
-          APTLY=/tmp/aptly_1.6.1_linux_amd64/aptly
+          # aptly ships .zip releases, not .tar.gz, and amd64/arm64 (not
+          # x86_64/aarch64) in its asset names.
+          APTLY_VERSION="1.6.3"
+          APTLY_ARCH="${{ needs.prepare.outputs.architecture == 'aarch64' && 'arm64' || 'amd64' }}"
+          curl -fsSL -o /tmp/aptly.zip \
+            "https://github.com/aptly-dev/aptly/releases/download/v${APTLY_VERSION}/aptly_${APTLY_VERSION}_linux_${APTLY_ARCH}.zip"
+          unzip -q /tmp/aptly.zip -d /tmp/aptly_extracted
+          APTLY=/tmp/aptly_extracted/aptly_${APTLY_VERSION}_linux_${APTLY_ARCH}/aptly
 
           "$APTLY" repo create -distribution="stable" -component="main" forge-super
           "$APTLY" repo add forge-super target/release/*.deb
