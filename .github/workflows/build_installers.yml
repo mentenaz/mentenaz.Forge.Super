@@ -149,6 +149,9 @@ jobs:
       # Also compiled into the app (option_env! in crates/auto_update), which
       # is how its update check knows which release it is.
       FORGE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      # Deliberately NOT set: ZED_MINIDUMP_ENDPOINT (upstream's workflows set it).
+      # With no endpoint compiled in, the app uploads no crash reports, which is
+      # what docs/privacy on the website says. Setting it would make that page wrong.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -196,6 +199,9 @@ jobs:
       # Also compiled into the app (option_env! in crates/auto_update), which
       # is how its update check knows which release it is.
       FORGE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      # Deliberately NOT set: ZED_MINIDUMP_ENDPOINT (upstream's workflows set it).
+      # With no endpoint compiled in, the app uploads no crash reports, which is
+      # what docs/privacy on the website says. Setting it would make that page wrong.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -491,7 +497,7 @@ jobs:
                 --jq .message 2>/dev/null | head -n 1 || true)
               summary="${tag_message#*: }"
               if [ -n "$summary" ] && [ "$summary" != "$tag_message" ]; then
-                items=$(printf '%s\n' "$summary" | sed -e 's/, /\n/g' | sed -E 's/^(.)/- \U\1/')
+                items=$(printf '%s\n' "$summary" | sed -e 's/, /\n/g' | sed -e 's/^/- /')
                 WHATS_NEW=$(printf '## What changed\n\n%s\n' "$items")
               fi
             fi
