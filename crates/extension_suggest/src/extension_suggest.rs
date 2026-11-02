@@ -162,6 +162,7 @@ const SUGGESTIONS_BY_EXTENSION_ID: &[(&str, &[&str])] = &[
     ),
     ("r", &["R", "Rmd", "qmd", "r", "rmd"]),
     ("racket", &["rkt"]),
+    ("razor", &["cshtml", "razor"]),
     ("rescript", &["res", "resi"]),
     ("rst", &["rst"]),
     (
@@ -431,5 +432,21 @@ mod tests {
                 .is_sorted(),
             "suggested extensions must be sorted by id"
         );
+    }
+
+    #[test]
+    pub fn test_razor_files_suggest_the_razor_extension() {
+        for (path, suffix) in [
+            ("Views/Admin/Index.cshtml", "cshtml"),
+            ("Pages/Counter.razor", "razor"),
+        ] {
+            assert_eq!(
+                suggest_extension(rel_path(path)),
+                Some(SuggestedExtension {
+                    extension_id: "razor".into(),
+                    file_name_or_extension: suffix.into()
+                })
+            );
+        }
     }
 }
