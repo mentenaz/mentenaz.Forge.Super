@@ -4377,3 +4377,96 @@ impl Extension for FakeExtension {
         anyhow::bail!("not supported by FakeExtension")
     }
 }
+
+
+/// Installs "scheme" against a registry that answers every request with `status`, and
+/// returns the failures the store reported as (extension id, message).
+async fn install_against_registry_status(
+    cx: &mut TestAppContext,
+    status: u16,
+) -> (Vec<(String, String)>, bool) {
+    init_test(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/the-extension-dir", json!({ "installed": {} }))
+        .await;
+    let http_client = FakeHttpClient::create(move |_| async move {
+        Ok(Response::builder()
+            .status(status)
+            .body(r#"{"error":"not found"}"#.into())?)
+    });
+
+    let proxy = Arc::new(ExtensionHostProxy::new());
+    let node_runtime = NodeRuntime::unavailable();
+    let store = cx.new(|cx| {
+        ExtensionStore::new(
+            PathBuf::from("/the-extension-dir"),
+            None,
+            proxy,
+            fs.clone(),
+            http_client.clone(),
+            http_client.clone(),
+            None,
+            node_runtime,
+            cx,
+        )
+    });
+
+    let failures = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    store.update(cx, |_, cx| {
+        let failures = failures.clone();
+        cx.subscribe(&store, move |_, _, event, _| {
+            if let Event::ExtensionFailedToInstall {
+                extension_id,
+                message,
+            } = event
+            {
+                failures
+                    .lock()
+                    .push((extension_id.to_string(), message.to_string()));
+            }
+        })
+        .detach();
+    });
+
+    store.update(cx, |store, cx| {
+        store.install_latest_extension("scheme".into(), cx)
+    });
+    cx.run_until_parked();
+
+    let nothing_left_running = store.read_with(cx, |store, _| {
+        !store.installed_extensions().contains_key("scheme")
+            && store.outstanding_operations().is_empty()
+    });
+    let failures = failures.lock().clone();
+    (failures, nothing_left_running)
+}
+
+#[gpui::test]
+async fn test_install_of_a_missing_extension_says_it_was_not_found(cx: &mut TestAppContext) {
+    let (failures, nothing_left_running) = install_against_registry_status(cx, 404).await;
+
+    assert_eq!(failures.len(), 1, "expected exactly one failure: {failures:?}");
+    assert_eq!(failures[0].0, "scheme");
+    assert!(
+        failures[0]
+            .1
+            .contains("'scheme' extension: the extension 'scheme' was not found in the extension registry"),
+        "unexpected message: {}",
+        failures[0].1
+    );
+    assert!(nothing_left_running);
+}
+
+#[gpui::test]
+async fn test_install_when_the_registry_errors_says_which_status(cx: &mut TestAppContext) {
+    let (failures, nothing_left_running) = install_against_registry_status(cx, 503).await;
+
+    assert_eq!(failures.len(), 1, "expected exactly one failure: {failures:?}");
+    assert!(
+        failures[0].1.contains("the extension registry answered 503"),
+        "unexpected message: {}",
+        failures[0].1
+    );
+    assert!(nothing_left_running);
+}

@@ -38,6 +38,9 @@ use vim_mode_setting::VimModeSetting;
 use workspace::{
     Workspace,
     item::{Item, ItemEvent},
+    notifications::{
+        NotificationId, show_app_notification, simple_message_notification::MessageNotification,
+    },
     workspace_error::{ErrorAction, ErrorSeverity, WorkspaceError},
 };
 use zed_actions::ExtensionCategoryFilter;
@@ -110,6 +113,25 @@ pub fn init(cx: &mut App) {
     })
     .detach();
     extension_suggestions::init(cx);
+
+    // An install that fails (the registry has no such extension, for example) used to
+    // leave only a line in the log. Say so on screen.
+    cx.subscribe(&store, |_, event, cx| {
+        if let extension_host::Event::ExtensionFailedToInstall {
+            extension_id,
+            message,
+        } = event
+        {
+            struct ExtensionInstallFailure;
+            let message = message.clone();
+            show_app_notification(
+                NotificationId::composite::<ExtensionInstallFailure>(extension_id.to_string()),
+                cx,
+                move |cx| cx.new(|cx| MessageNotification::new(message.clone(), cx)),
+            );
+        }
+    })
+    .detach();
 
     cx.observe_new(move |workspace: &mut Workspace, window, _cx| {
         if window.is_none() {

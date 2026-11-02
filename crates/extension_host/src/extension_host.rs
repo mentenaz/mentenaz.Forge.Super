@@ -33,6 +33,7 @@ use futures::{
 use gpui::{
     App, AppContext as _, AsyncApp, Context, Entity, EntityId, EventEmitter, Global, Subscription,
     Task, TaskExt, UpdateGlobal as _, WeakEntity, actions,
+    SharedString,
 };
 use http_client::{AsyncBody, HttpClient, HttpClientWithUrl};
 use language::{
@@ -210,9 +211,29 @@ pub enum Event {
     ExtensionInstalled(Arc<str>),
     ExtensionUninstalled(Arc<str>),
     ExtensionFailedToLoad(Arc<str>),
+    /// An install or upgrade could not be completed, with a message fit to show the user.
+    ExtensionFailedToInstall {
+        extension_id: Arc<str>,
+        message: SharedString,
+    },
 }
 
 impl EventEmitter<Event> for ExtensionStore {}
+
+/// What to tell the user when an install fails. The registry's own wording for a
+/// missing or unavailable extension is already readable; any other failure gets a
+/// short generic line, with the detail left in the log.
+fn install_failure_message(extension_id: &str, error: &anyhow::Error) -> SharedString {
+    let text = format!("{error:#}");
+    let message = if text.contains("was not found in the extension registry")
+        || text.contains("the extension registry answered")
+    {
+        format!("Couldn't install the '{extension_id}' extension: {text}.")
+    } else {
+        format!("Couldn't install the '{extension_id}' extension. See the log for details.")
+    };
+    message.into()
+}
 
 struct GlobalExtensionStore(Entity<ExtensionStore>);
 
@@ -885,11 +906,26 @@ impl ExtensionStore {
                 }
             });
 
-            cx.background_spawn(async move {
+            let download_extension_id = extension_id.clone();
+            let download = cx.background_spawn(async move {
                 let mut response = http_client
                     .get(url.as_ref(), Default::default(), true)
                     .await
                     .context("downloading extension")?;
+
+                // An error page is not an archive: without this a missing extension
+                // fails later as "Invalid gzip header" and nobody can tell why.
+                let status = response.status();
+                if status == http_client::http::StatusCode::NOT_FOUND {
+                    bail!(
+                        "the extension '{download_extension_id}' was not found in the extension registry"
+                    );
+                }
+                if !status.is_success() {
+                    bail!(
+                        "the extension registry answered {status} when downloading '{download_extension_id}'"
+                    );
+                }
 
                 let content_length = response
                     .headers()
@@ -948,8 +984,20 @@ impl ExtensionStore {
                         archive.unpack(extension_dir).await.map_err(Into::into)
                     }
                 }
-            })
-            .await?;
+            });
+
+            if let Err(error) = download.await {
+                log::error!("failed to install extension {extension_id}: {error:#}");
+                let message = install_failure_message(&extension_id, &error);
+                this.update(cx, |_, cx| {
+                    cx.emit(Event::ExtensionFailedToInstall {
+                        extension_id: extension_id.clone(),
+                        message,
+                    })
+                })
+                .ok();
+                return Err(error);
+            }
 
             this.update(cx, |this, cx| this.reload(Some(extension_id.clone()), cx))?
                 .await;
