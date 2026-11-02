@@ -1386,7 +1386,7 @@ pub mod simple_message_notification {
                 fn primary_action(&self) -> ErrorAction {
                     ErrorAction::link(
                         "See Docs",
-                        "https://zed.dev/docs/linux#i-cant-open-any-files",
+                        "https://forge.mentenaz-server.com/docs/linux#i-cant-open-any-files-or-links-dont-work",
                     )
                 }
             }

@@ -146,6 +146,8 @@ jobs:
     timeout-minutes: 180
     env:
       # Read by script/lib/workspace.ps1 for the installer version.
+      # Also compiled into the app (option_env! in crates/auto_update), which
+      # is how its update check knows which release it is.
       FORGE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
     steps:
       - name: Checkout
@@ -191,6 +193,8 @@ jobs:
       CXX: clang++
       # Becomes the fourth part of the .deb's version (script/bundle-deb),
       # so each release is newer to apt than the last.
+      # Also compiled into the app (option_env! in crates/auto_update), which
+      # is how its update check knows which release it is.
       FORGE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
     steps:
       - name: Checkout
@@ -472,11 +476,34 @@ jobs:
             exit 1
           fi
 
+          # What changed: the annotated tag's message, which the release
+          # process writes as "dev-vN: first change, second change, ...". It is
+          # shown first, as a list, because the release notes page on the
+          # website (and "View release notes" in the app) is built from this
+          # body. A lightweight tag, a manual run or a message that is not in
+          # that form just gets no list.
+          WHATS_NEW=""
+          if [ "$RELEASE_TAG" != "dev-build" ]; then
+            tag_object=$(gh api "repos/${GH_REPO}/git/ref/tags/${RELEASE_TAG}" \
+              --jq '.object.type + " " + .object.sha' 2>/dev/null || true)
+            if [ "${tag_object%% *}" = "tag" ]; then
+              tag_message=$(gh api "repos/${GH_REPO}/git/tags/${tag_object##* }" \
+                --jq .message 2>/dev/null | head -n 1 || true)
+              summary="${tag_message#*: }"
+              if [ -n "$summary" ] && [ "$summary" != "$tag_message" ]; then
+                items=$(printf '%s\n' "$summary" | sed -e 's/, /\n/g' | sed -E 's/^(.)/- \U\1/')
+                WHATS_NEW=$(printf '## What changed\n\n%s\n' "$items")
+              fi
+            fi
+          fi
+
           # The release body is written to a file so it can be several
           # paragraphs without fighting shell quoting; the unquoted heredoc
           # lets the tag and architecture expand (backticks are escaped so the
           # shell does not treat them as command substitution).
           cat > release-notes.md <<EOF
+          ${WHATS_NEW}
+
           **Mentenaz Forge Super** is a *developer cockpit* built on the
           open-source [Zed](https://github.com/zed-industries/zed) editor: a
           native Rust/GPUI workspace that folds the tooling normally scattered

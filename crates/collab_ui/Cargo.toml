@@ -34,6 +34,7 @@ call.workspace = true
 channel.workspace = true
 client.workspace = true
 collections.workspace = true
+command_palette_hooks.workspace = true
 db.workspace = true
 editor.workspace = true
 futures.workspace = true

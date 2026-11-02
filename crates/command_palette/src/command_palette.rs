@@ -71,6 +71,12 @@ pub fn normalize_action_query(input: &str) -> String {
         result.push(normalized_char);
     }
 
+    // The `zed::` actions are listed as `forge:` (see `humanize_action_name`), so
+    // a query typed from muscle memory still finds them.
+    if let Some(rest) = result.strip_prefix(ZED_ACTION_LABEL) {
+        result = format!("{FORGE_ACTION_LABEL}{rest}");
+    }
+
     result
 }
 
@@ -864,7 +870,21 @@ impl PickerDelegate for CommandPaletteDelegate {
     }
 }
 
+/// The prefix `humanize_action_name` produces for actions in the `zed`
+/// namespace, and the one shown instead. Only the label changes: the action
+/// names themselves stay `zed::...` so existing keymaps keep working.
+const ZED_ACTION_LABEL: &str = "zed:";
+const FORGE_ACTION_LABEL: &str = "forge:";
+
 pub fn humanize_action_name(name: &str) -> String {
+    let humanized = humanize_action_name_inner(name);
+    match humanized.strip_prefix(ZED_ACTION_LABEL) {
+        Some(rest) => format!("{FORGE_ACTION_LABEL}{rest}"),
+        None => humanized,
+    }
+}
+
+fn humanize_action_name_inner(name: &str) -> String {
     let chars = name.chars().collect::<Vec<_>>();
     let capacity = name.len() + chars.iter().filter(|c| c.is_uppercase()).count();
     let mut result = String::with_capacity(capacity);
@@ -951,6 +971,16 @@ mod tests {
     use project::Project;
     use settings::KeymapFile;
     use workspace::{AppState, MultiWorkspace, Workspace};
+
+    #[test]
+    fn test_zed_namespace_is_labelled_forge() {
+        assert_eq!(humanize_action_name("zed::OpenSettings"), "forge: open settings");
+        assert_eq!(humanize_action_name("zed::Quit"), "forge: quit");
+        // Other namespaces, even ones that merely start with "zed", are untouched.
+        assert_eq!(humanize_action_name("zed_predict::Toggle"), "zed predict: toggle");
+        assert_eq!(normalize_action_query("zed: open settings"), "forge: open settings");
+        assert_eq!(normalize_action_query("zed::open_settings"), "forge:open settings");
+    }
 
     #[test]
     fn test_humanize_action_name() {

@@ -1145,8 +1145,10 @@
     "button": true,
   },
   "collaboration_panel": {
-    // Whether to show the collaboration panel button in the status bar.
-    "button": true,
+    // Whether to show the collaboration panel button in the status bar. Off:
+    // the panel signs in to Zed's collaboration servers, which Forge Super
+    // does not use, and it is no longer loaded at startup.
+    "button": false,
     // Where to dock the collaboration panel. Can be 'left' or 'right'.
     "dock": "right",
     // Default width of the collaboration panel.
@@ -1277,15 +1279,14 @@
     // Maximum content width in pixels when limit_content_width is enabled.
     // Content will be centered within the panel.
     "max_content_width": 850,
-    // The default model to use when creating new threads.
-    "default_model": {
-      // The provider to use.
-      "provider": "zed.dev",
-      // The model to use.
-      "model": "claude-sonnet-4",
-      // Whether thinking is enabled.
-      "enable_thinking": false,
-    },
+    // The default model to use when creating new threads. Not set by default:
+    // Forge Super has no hosted provider of its own, so the agent panel asks you
+    // to configure one. For example:
+    // "default_model": {
+    //   "provider": "anthropic",
+    //   "model": "claude-sonnet-4",
+    //   "enable_thinking": false,
+    // },
     // Additional parameters for language model requests. When making a request to a model, parameters will be taken
     // from the last entry in this list that matches the model's provider and name. In each entry, both provider
     // and model are optional, so that you can specify parameters for either one.
@@ -1799,8 +1800,9 @@
   //
   // Default: false
   "disable_ai": false,
-  // Automatically update Zed. This setting may be ignored on Linux if
-  // installed through a package manager.
+  // Forge Super never updates itself. This controls the daily check that asks
+  // GitHub whether a newer release exists and tells you if so (it only runs
+  // after you agree to it on first launch, and never downloads anything).
   "auto_update": true,
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
@@ -2003,8 +2005,10 @@
   //      "load_direnv": "disabled"
   "load_direnv": "direct",
   "edit_predictions": {
-    // Which edit prediction provider to use.
-    "provider": "zed",
+    // Which edit prediction provider to use. Off by default: the Zed-hosted
+    // provider needs a Zed account, which Forge Super does not use. Choose one
+    // of "copilot", "codestral", "ollama", "open_ai_compatible_api" or "mercury".
+    "provider": "none",
     // Disable edit predictions for files matching these glob patterns.
     //
     // Use `"..."` to add patterns without repeating Zed's defaults. In project

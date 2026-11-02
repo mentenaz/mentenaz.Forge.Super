@@ -7,6 +7,7 @@ mod panel_settings;
 use std::{rc::Rc, sync::Arc};
 
 pub use collab_panel::CollabPanel;
+use command_palette_hooks::CommandPaletteFilter;
 use gpui::{
     App, Pixels, PlatformDisplay, Size, WindowBackgroundAppearance, WindowBounds,
     WindowDecorations, WindowKind, WindowOptions, point,
@@ -18,6 +19,15 @@ use workspace::AppState;
 
 // Another comment, nice.
 pub fn init(app_state: &Arc<AppState>, cx: &mut App) {
+    // Collaboration needs Zed's hosted servers, which Forge Super does not use,
+    // and the panel is not added to the workspace. Keep its commands out of the
+    // palette so none of them is offered with nothing behind it.
+    CommandPaletteFilter::update_global(cx, |filter, _| {
+        filter.hide_namespace("collab");
+        filter.hide_namespace("collab_panel");
+        filter.hide_namespace("channel_modal");
+    });
+
     call_stats_modal::init(cx);
     channel_view::init(cx);
     collab_panel::init(cx);

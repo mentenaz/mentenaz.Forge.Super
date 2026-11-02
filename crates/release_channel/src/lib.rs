@@ -9,6 +9,11 @@ use semver::Version;
 
 const ZED_DOCS_URL: &str = "https://zed.dev/docs";
 
+/// Forge Super's own docs: install, updating, troubleshooting and the release
+/// notes. Pages the app links to by anchor (`#could-not-start-inotify`) are
+/// listed in `docs/` of the landing site, so keep the two in step.
+pub const FORGE_DOCS_URL: &str = "https://forge.mentenaz-server.com/docs";
+
 /// stable | dev | nightly | preview
 pub static RELEASE_CHANNEL_NAME: LazyLock<String> = LazyLock::new(|| {
     if cfg!(debug_assertions) {
