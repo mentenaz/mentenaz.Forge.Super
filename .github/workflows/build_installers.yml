@@ -284,6 +284,11 @@ jobs:
           # line and import command this pairs with.
           gpg --export --armor "$GPG_FPR" > ~/.aptly/public/mentenaz.gpg
 
+          # The one-line installer (curl .../install.sh | sudo sh). It pins
+          # this key's fingerprint, so it ships from the same commit as the
+          # repository it sets up.
+          install -m 0644 script/install.sh ~/.aptly/public/install.sh
+
       - name: Deploy the apt repository to downloads.mentenaz-server.com
         if: ${{ needs.prepare.outputs.publish_release == 'true' }}
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
