@@ -1,7 +1,7 @@
 //! Notify-only update check against the GitHub releases of this fork.
 //!
 //! Forge Super never updates itself (see `update_explanation`): installing
-//! comes from winget, the installer or apt. This only asks GitHub which is the
+//! comes from the installer or apt (and winget, once the package is published). This only asks GitHub which is the
 //! newest published release and says so when it is newer than the running
 //! build. Nothing is downloaded or installed.
 //!

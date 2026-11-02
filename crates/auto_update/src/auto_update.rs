@@ -312,8 +312,9 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
 ///
 /// Upstream Zed returns `None` unless a package manager set
 /// `ZED_UPDATE_EXPLANATION`, and then updates from zed.dev. This fork must
-/// never do that (it would install upstream Zed), and is updated by winget or
-/// apt instead, so this always returns a message: `ZED_UPDATE_EXPLANATION`,
+/// never do that (it would install upstream Zed), and is updated by running
+/// the installer or by apt instead (winget once the package is published), so
+/// this always returns a message: `ZED_UPDATE_EXPLANATION`,
 /// at build time or run time, or the default below.
 fn update_explanation() -> Option<String> {
     option_env!("ZED_UPDATE_EXPLANATION")
@@ -321,9 +322,9 @@ fn update_explanation() -> Option<String> {
         .or_else(|| env::var("ZED_UPDATE_EXPLANATION").ok())
         .or_else(|| {
             Some(format!(
-                "Update {} with 'winget upgrade Mentenaz.Forge.Super' on Windows, \
-                 or install the latest release from \
-                 https://github.com/mentenaz/mentenaz.Forge.Super/releases.",
+                "Update {} by running the latest installer from \
+                 https://github.com/mentenaz/mentenaz.Forge.Super/releases on Windows, \
+                 or with 'sudo apt-get update && sudo apt-get upgrade' on Linux.",
                 release_channel::RELEASE_CHANNEL.display_name()
             ))
         })

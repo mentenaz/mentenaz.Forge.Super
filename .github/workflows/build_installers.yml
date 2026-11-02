@@ -559,3 +559,37 @@ jobs:
               "${release_kind[@]}"
           fi
           gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
+
+      # Records the release and its files on the website, where the homepage
+      # lists the direct downloads. The files stay on the GitHub Release; only
+      # their URLs are sent. A failure here is reported but never fails the
+      # release, and manual "dev-build" runs are not recorded. When the winget
+      # package exists, its submission step belongs right after this one.
+      - name: Record the release on the website
+        if: ${{ success() && needs.prepare.outputs.release_tag != 'dev-build' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_SYNC_SECRET: ${{ secrets.FORGE_RELEASE_SYNC_SECRET }}
+        run: |
+          if [ -z "$RELEASE_SYNC_SECRET" ]; then
+            echo "::warning::FORGE_RELEASE_SYNC_SECRET is not set; the website was not told about ${RELEASE_TAG}."
+            exit 0
+          fi
+
+          payload=$(gh release view "$RELEASE_TAG" --json name,body,publishedAt,assets | jq -c --arg tag "$RELEASE_TAG" '{
+            tag: $tag,
+            name: .name,
+            body: .body,
+            published_at: .publishedAt,
+            assets: [.assets[] | {name: .name, size: .size, url: .url}]
+          }')
+
+          curl --fail-with-body --silent --show-error --retry 3 --retry-delay 5 \
+            -X POST "https://forge.mentenaz-server.com/api/releases/sync" \
+            -H "Authorization: Bearer ${RELEASE_SYNC_SECRET}" \
+            -H "Content-Type: application/json" \
+            --data "$payload"
+          echo
