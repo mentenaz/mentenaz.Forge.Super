@@ -428,7 +428,7 @@ jobs:
       # Signed SLSA build provenance for every file about to be published,
       # so anyone can check a download was built by this workflow from this
       # repository, unmodified:
-      #   gh attestation verify <file> --repo mentenaz/zed_Source
+      # gh attestation verify <file> --repo mentenaz/mentenaz.Forge.Super
       # Done here rather than in each build job: one step instead of three.
       # The files pass through upload/download-artifact first, but within
       # the same workflow run, so the claim still holds. Skipped when

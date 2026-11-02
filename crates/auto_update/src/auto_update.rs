@@ -319,7 +319,7 @@ fn update_explanation() -> Option<String> {
             Some(format!(
                 "Update {} with 'winget upgrade Mentenaz.Forge.Super' on Windows, \
                  or install the latest release from \
-                 https://github.com/mentenaz/zed_Source/releases.",
+                 https://github.com/mentenaz/mentenaz.Forge.Super/releases.",
                 release_channel::RELEASE_CHANNEL.display_name()
             ))
         })

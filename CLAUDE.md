@@ -107,12 +107,12 @@ form, `Tag::custom(color.opacity(0.2), color, color.opacity(0.3))`, or
 # Releases
 
 A release is an annotated tag `dev-vN` on `main`, pushed to `origin`
-(`mentenaz/zed_Source`). The tag push runs the `build_installers` workflow,
+(`mentenaz/mentenaz.Forge.Super`). The tag push runs the `build_installers` workflow,
 which publishes a normal (not pre-) release "Mentenaz Forge Super dev-vN
 (x86_64)" with `Mentenaz-Forge-Super-x86_64.exe`. Use the next number after
 the latest `dev-v*` tag, and a message of the form
 `dev-vN: comma-separated summary of what changed since the last tag`.
-`gh` resolves to upstream Zed by default here; pass `-R mentenaz/zed_Source`.
+`gh` resolves to upstream Zed by default here; pass `-R mentenaz/mentenaz.Forge.Super`.
 
 - The `N` in the tag is the fourth part of the installer version
   (`1.27.0.N`), which winget and Windows compare, so tag numbers must only

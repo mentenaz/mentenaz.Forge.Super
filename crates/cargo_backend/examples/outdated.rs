@@ -12,7 +12,7 @@ use cargo_backend::{
     parse_index, read_lockfile,
 };
 
-const USER_AGENT: &str = "zed-fork cargo_backend example (https://github.com/mentenaz/zed_Source)";
+const USER_AGENT: &str = "zed-fork cargo_backend example (https://github.com/mentenaz/mentenaz.Forge.Super)";
 
 #[allow(clippy::disallowed_methods)]
 fn fetch(url: &str) -> Result<String, String> {
