@@ -189,6 +189,9 @@ jobs:
     env:
       CC: clang
       CXX: clang++
+      # Becomes the fourth part of the .deb's version (script/bundle-deb),
+      # so each release is newer to apt than the last.
+      FORGE_BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -249,7 +252,12 @@ jobs:
       # forward from previous runs, so the published repo always serves
       # only the latest version per architecture. Older versions stay
       # downloadable via GitHub Releases, just not through `apt` itself.
+      # Only for runs that publish a release. The repo is rebuilt from just
+      # this run's .deb and overwrites what is on the server, so a manual
+      # test run (build number 0, publish_release=false) would otherwise
+      # replace the real release with a test build.
       - name: Publish the apt repository
+        if: ${{ needs.prepare.outputs.publish_release == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -277,6 +285,7 @@ jobs:
           gpg --export --armor "$GPG_FPR" > ~/.aptly/public/mentenaz.gpg
 
       - name: Deploy the apt repository to downloads.mentenaz-server.com
+        if: ${{ needs.prepare.outputs.publish_release == 'true' }}
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.AFRIHOST_FTP_HOST }}

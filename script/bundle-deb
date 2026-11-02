@@ -38,6 +38,15 @@ fi
 channel=$(<crates/zed/RELEASE_CHANNEL)
 version=$(script/get-crate-version zed)
 
+# The crate version is the same for every dev-vN build, and apt only offers
+# an upgrade when the package version goes up, so every release would look
+# like the one already installed. The tag's build number goes on as a fourth
+# part, like the Windows installer's 1.27.0.N (FORGE_BUILD_NUMBER is set by
+# build_installers.yml; an untagged build gets 0, below every tagged one).
+if [[ "${FORGE_BUILD_NUMBER:-}" =~ ^[0-9]+$ ]]; then
+  version="${version}.${FORGE_BUILD_NUMBER}"
+fi
+
 # Same channel-suffix convention as bundle-linux/bundle-mac's own $suffix —
 # "forge-super" for stable, "forge-super-dev"/"forge-super-nightly"/
 # "forge-super-preview" otherwise, so a dev build's .deb can never collide
