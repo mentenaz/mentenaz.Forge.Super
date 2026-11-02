@@ -455,7 +455,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Telemetry Metrics",
-                description: "Send anonymized usage data like what languages you're using Zed with.",
+                description: "Has no effect in Forge Super: usage data is never sent.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("telemetry.metrics"),

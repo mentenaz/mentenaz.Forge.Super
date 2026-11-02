@@ -68,6 +68,22 @@ struct TelemetryState {
     subscribers: Vec<mpsc::UnboundedSender<EventWrapper>>,
 }
 
+/// Forge Super does not run a usage-data collector, and the code below would
+/// send events to Zed's endpoint, so uploading is switched off for good: the
+/// `telemetry.metrics` setting is accepted but has no effect. Crash reports are
+/// separate (see `MINIDUMP_ENDPOINT`).
+///
+/// It is on only inside this crate's own tests, so the queue and flush
+/// machinery stays covered; the assertion below stops any non-test build from
+/// shipping with it on.
+const USAGE_DATA_UPLOAD_ENABLED: bool = cfg!(test);
+
+#[cfg(not(test))]
+const _: () = assert!(
+    !USAGE_DATA_UPLOAD_ENABLED,
+    "usage data upload must stay off in Forge Super builds"
+);
+
 #[cfg(debug_assertions)]
 const MAX_QUEUE_LEN: usize = 5;
 
@@ -369,7 +385,7 @@ impl Telemetry {
     }
 
     pub fn metrics_enabled(self: &Arc<Self>) -> bool {
-        self.state.lock().settings.metrics
+        USAGE_DATA_UPLOAD_ENABLED && self.state.lock().settings.metrics
     }
 
     pub fn diagnostics_enabled(self: &Arc<Self>) -> bool {
@@ -568,7 +584,7 @@ impl Telemetry {
         // RUST_LOG=telemetry=trace to debug telemetry events
         log::trace!(target: "telemetry", "{:?}", event);
 
-        if !state.settings.metrics {
+        if !USAGE_DATA_UPLOAD_ENABLED || !state.settings.metrics {
             return;
         }
 
@@ -658,6 +674,11 @@ impl Telemetry {
     }
 
     pub async fn flush_events_inner(self: &Arc<Self>) -> Result<()> {
+        // Nothing is ever queued while uploading is off; this is a second guard.
+        if !USAGE_DATA_UPLOAD_ENABLED {
+            return Ok(());
+        }
+
         let (json_bytes, request_body) = {
             let mut state = self.state.lock();
             state.first_event_date_time = None;
@@ -1060,9 +1081,18 @@ mod tests {
     // Update FakeHTTPClient to keep track of the number of requests and assert on it
 
     fn init_test(cx: &mut TestAppContext) {
+        use gpui::UpdateGlobal as _;
+
         cx.update(|cx| {
             let settings_store = SettingsStore::test(cx);
             cx.set_global(settings_store);
+            // Usage data is off by default (see default.json), but these tests
+            // exercise the queue and flush code, which only runs when it is on.
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.telemetry.get_or_insert_default().metrics = Some(true);
+                });
+            });
         });
     }
 
