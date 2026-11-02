@@ -59,6 +59,14 @@ struct Args {
     /// The path to a directory where build dependencies are downloaded
     #[arg(long)]
     scratch_dir: PathBuf,
+    /// Report validation failures as warnings and package the extension anyway.
+    ///
+    /// Compiling, archiving and writing the manifest still have to succeed. For
+    /// mirroring extensions that are already published: the checks are the
+    /// rules a new submission must pass, they have tightened since many of
+    /// those were published, and they do not change what goes in the archive.
+    #[arg(long)]
+    lenient: bool,
 }
 
 #[tokio::main]
@@ -116,19 +124,30 @@ async fn main() -> Result<()> {
         .await
         .context("failed to compile extension")?;
 
-    validate_extension_manifest(&manifest)?;
     let extension_provides = manifest.provides();
-    validate_extension_features(&extension_provides)?;
 
-    let cx = TestingContext::new(&manifest, &extension_path);
-    let grammars = test_grammars(&manifest, &extension_path, &mut wasm_store)?;
-    test_languages(&manifest, &extension_path, &grammars, &cx)?;
-    log::info!("validating themes");
-    test_themes(&manifest, &extension_path, fs.clone()).await?;
-    log::info!("validating snippets");
-    test_snippets(&manifest, &extension_path, fs.clone()).await?;
-    log::info!("validating debug adapter schemas");
-    test_debug_adapter_schemas(&manifest, &extension_path, fs.clone()).await?;
+    let validation = async {
+        validate_extension_manifest(&manifest)?;
+        validate_extension_features(&extension_provides)?;
+
+        let cx = TestingContext::new(&manifest, &extension_path);
+        let grammars = test_grammars(&manifest, &extension_path, &mut wasm_store)?;
+        test_languages(&manifest, &extension_path, &grammars, &cx)?;
+        log::info!("validating themes");
+        test_themes(&manifest, &extension_path, fs.clone()).await?;
+        log::info!("validating snippets");
+        test_snippets(&manifest, &extension_path, fs.clone()).await?;
+        log::info!("validating debug adapter schemas");
+        test_debug_adapter_schemas(&manifest, &extension_path, fs.clone()).await?;
+        anyhow::Ok(())
+    }
+    .await;
+    match validation {
+        Err(error) if args.lenient => {
+            log::warn!("ignoring validation failure (--lenient): {error:#}")
+        }
+        other => other?,
+    }
 
     log::info!("preparing archive directory");
     let archive_dir = output_dir.join("archive");
