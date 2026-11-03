@@ -257,47 +257,28 @@ jobs:
       # Publishes an actual `apt`-installable repository at
       # downloads.mentenaz-server.com, separate from the raw .deb already
       # uploaded as a workflow artifact / attached to the GitHub release.
-      # aptly builds the repo fresh each run (dists/, pool/, a GPG-signed
-      # Release) from just this run's .deb — it doesn't carry history
-      # forward from previous runs, so the published repo always serves
-      # only the latest version per architecture. Older versions stay
-      # downloadable via GitHub Releases, just not through `apt` itself.
-      # Only for runs that publish a release. The repo is rebuilt from just
-      # this run's .deb and overwrites what is on the server, so a manual
-      # test run (build number 0, publish_release=false) would otherwise
-      # replace the real release with a test build.
-      - name: Publish the apt repository
+      #
+      # The repository has two distributions. A tag build goes to `edge`
+      # only; `stable`, the one install.sh sets users up with, stays on the
+      # build somebody last promoted (the promote-apt-stable workflow) so a
+      # bad build never reaches `apt upgrade` on its own. script/publish-apt-repo
+      # does the work: it rebuilds both from the last few GitHub releases
+      # plus the .deb built here, reads the current stable version back from
+      # the published index, and signs the result.
+      # Only for runs that publish a release. A manual test run (build number
+      # 0, publish_release=false) would otherwise put a test build on `edge`.
+      - name: Publish the apt repository (edge)
         if: ${{ needs.prepare.outputs.publish_release == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
         run: |
           set -euo pipefail
 
-          echo "${{ secrets.APT_GPG_PRIVATE_KEY }}" | base64 -d | gpg --batch --import
-          GPG_FPR="42E9F3A7505F1AAD3DA6DCDFF128FBB1B8210F56"
+          echo "$APT_GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+          export GPG_FPR="42E9F3A7505F1AAD3DA6DCDFF128FBB1B8210F56"
 
-          # aptly ships .zip releases, not .tar.gz, and amd64/arm64 (not
-          # x86_64/aarch64) in its asset names.
-          APTLY_VERSION="1.6.3"
-          APTLY_ARCH="${{ needs.prepare.outputs.architecture == 'aarch64' && 'arm64' || 'amd64' }}"
-          curl -fsSL -o /tmp/aptly.zip \
-            "https://github.com/aptly-dev/aptly/releases/download/v${APTLY_VERSION}/aptly_${APTLY_VERSION}_linux_${APTLY_ARCH}.zip"
-          unzip -q /tmp/aptly.zip -d /tmp/aptly_extracted
-          APTLY=/tmp/aptly_extracted/aptly_${APTLY_VERSION}_linux_${APTLY_ARCH}/aptly
-
-          "$APTLY" repo create -distribution="stable" -component="main" forge-super
-          "$APTLY" repo add forge-super target/release/*.deb
-          "$APTLY" publish repo -batch -gpg-key="$GPG_FPR" forge-super
-
-          # The public half of the signing key, for users to import before
-          # adding the repo — see docs/src/linux.md for the sources.list
-          # line and import command this pairs with.
-          gpg --export --armor "$GPG_FPR" > ~/.aptly/public/mentenaz.gpg
-
-          # The one-line installer (curl .../install.sh | sudo sh). It pins
-          # this key's fingerprint, so it ships from the same commit as the
-          # repository it sets up.
-          install -m 0644 script/install.sh ~/.aptly/public/install.sh
+          ./script/publish-apt-repo --new-deb "$(ls target/release/*.deb | head -n 1)"
 
       - name: Deploy the apt repository to downloads.mentenaz-server.com
         if: ${{ needs.prepare.outputs.publish_release == 'true' }}
@@ -310,11 +291,9 @@ jobs:
           port: 21
           local-dir: /home/runner/.aptly/public/
           server-dir: /
-          # false (the default) only uploads what changed and never
-          # deletes remote files missing locally — important since
-          # local-dir only ever contains this run's dists/, pool/, and the
-          # exported key, not the whole history; a clean-slate sync would
-          # wipe anything else already on the subdomain.
+          # false (the default) only uploads what changed; true would
+          # wipe anything else already on the subdomain. The tree built here
+          # holds every kept version of the package, not only this run's.
           dangerous-clean-slate: false
 
       - name: Upload artifact — Forge Super (tarball)

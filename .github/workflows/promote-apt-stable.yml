@@ -1,0 +1,75 @@
+# Promotes a build to the `stable` distribution of the apt repository.
+#
+# A tag build publishes only to `edge` (see build_installers.yml). Users set up
+# with install.sh follow `stable`, which stays where it is until this workflow
+# is run with the tag to promote, for example dev-v49. Running it with an older
+# tag rolls `stable` back to that build.
+#
+# The repository is rebuilt from the GitHub releases, the same way a tag build
+# does it; see script/publish-apt-repo.
+name: Promote apt stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          The release tag to make `stable`, for example dev-v49. It must have
+          a published GitHub release with a .deb attached.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apt-repository
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check the tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          case "$TAG" in
+            dev-v[0-9]*) ;;
+            *) echo "::error::The tag must look like dev-v49, got: $TAG"; exit 1 ;;
+          esac
+          case "${TAG#dev-v}" in
+            *[!0-9]*) echo "::error::The tag must look like dev-v49, got: $TAG"; exit 1 ;;
+          esac
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Publish the apt repository with the chosen stable build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          echo "$APT_GPG_PRIVATE_KEY" | base64 -d | gpg --batch --import
+          export GPG_FPR="42E9F3A7505F1AAD3DA6DCDFF128FBB1B8210F56"
+
+          ./script/publish-apt-repo --stable-tag "$TAG"
+
+      - name: Deploy the apt repository to downloads.mentenaz-server.com
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.AFRIHOST_FTP_HOST }}
+          username: ${{ secrets.AFRIHOST_FTP_USERNAME }}
+          password: ${{ secrets.AFRIHOST_FTP_PASSWORD }}
+          protocol: ftps
+          port: 21
+          local-dir: /home/runner/.aptly/public/
+          server-dir: /
+          # Only uploads what changed. The tree built here holds every kept
+          # version, so a rolled-back stable still has the newer packages in
+          # pool/ for edge to list.
+          dangerous-clean-slate: false

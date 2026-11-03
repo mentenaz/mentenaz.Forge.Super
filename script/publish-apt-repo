@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+
+# Builds and signs the apt repository under ~/.aptly/public with two
+# distributions:
+#
+#   edge    every build, as soon as CI has made it
+#   stable  only a build someone has promoted
+#
+# The repository is rebuilt from scratch on every run, so the packages come
+# from the GitHub releases (the last few of them, which also keeps older
+# versions installable with `apt install forge-super=<version>`), plus the
+# .deb that CI has just built and not yet attached to a release.
+#
+# Which build is stable is read back from the published repository itself
+# (dists/stable/.../Packages), so there is no second place to keep in step.
+# Promoting a build is running this with --stable-tag.
+#
+# Usage:
+#   script/publish-apt-repo --new-deb target/release/forge-super_1.28.0.49_amd64.deb
+#   script/publish-apt-repo --stable-tag dev-v49
+#
+# Environment:
+#   GPG_FPR           fingerprint of the signing key, already imported (required)
+#   GH_TOKEN          lets `gh` read the releases (required unless APT_LOCAL_DEBS is set)
+#   GH_REPO           where the releases are (default mentenaz/mentenaz.Forge.Super)
+#   APT_BASE_URL      where the repository is served (default https://downloads.mentenaz-server.com)
+#   APT_HISTORY       how many releases to keep installable (default 8)
+#   APTLY             path to aptly; downloaded when unset and not on PATH
+#   APT_LOCAL_DEBS    a directory of .debs to use instead of the releases (for testing)
+#   APT_STABLE_VERSION  the stable version to assume instead of asking APT_BASE_URL (for testing)
+
+set -euo pipefail
+
+GH_REPO="${GH_REPO:-mentenaz/mentenaz.Forge.Super}"
+APT_BASE_URL="${APT_BASE_URL:-https://downloads.mentenaz-server.com}"
+APT_HISTORY="${APT_HISTORY:-8}"
+APTLY_VERSION="1.6.3"
+
+new_deb=""
+stable_tag=""
+
+die() {
+    printf 'publish-apt-repo: %s\n' "$*" >&2
+    exit 1
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --new-deb)
+            [ "$#" -ge 2 ] || die "--new-deb needs a path"
+            new_deb="$2"
+            shift
+            ;;
+        --stable-tag)
+            [ "$#" -ge 2 ] || die "--stable-tag needs a tag such as dev-v49"
+            stable_tag="$2"
+            shift
+            ;;
+        *)
+            die "unknown option: $1"
+            ;;
+    esac
+    shift
+done
+
+[ -n "${GPG_FPR:-}" ] || die "GPG_FPR is not set"
+command -v dpkg >/dev/null || die "dpkg is required"
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+all_debs="$work/all"
+mkdir -p "$all_debs"
+
+# The package version a release carries, 1.28.0.N, is built from the tag
+# dev-vN, so either can be worked out from the other.
+version_of() {
+    dpkg-deb -f "$1" Version
+}
+
+tag_for_version() {
+    printf 'dev-v%s\n' "${1##*.}"
+}
+
+download_tag() {
+    gh release download "$1" -R "$GH_REPO" -p '*.deb' -D "$all_debs" --skip-existing >/dev/null 2>&1 || true
+}
+
+# ---- collect the packages ----------------------------------------------
+
+if [ -n "${APT_LOCAL_DEBS:-}" ]; then
+    cp "$APT_LOCAL_DEBS"/*.deb "$all_debs"/
+else
+    [ -n "${GH_TOKEN:-}" ] || die "GH_TOKEN is not set"
+    command -v gh >/dev/null || die "gh is required"
+    tags="$(
+        gh release list -R "$GH_REPO" --limit 100 --json tagName,isDraft,isPrerelease \
+            --jq '.[] | select(.isDraft == false and .isPrerelease == false) | .tagName' \
+            | grep -E '^dev-v[0-9]+$' | sed 's/^dev-v//' | sort -rn | head -n "$APT_HISTORY" || true
+    )"
+    for number in $tags; do
+        download_tag "dev-v$number"
+    done
+fi
+
+if [ -n "$new_deb" ]; then
+    [ -f "$new_deb" ] || die "no such file: $new_deb"
+    cp "$new_deb" "$all_debs"/
+fi
+
+# ---- decide which version is stable ------------------------------------
+
+stable_version=""
+if [ -n "$stable_tag" ]; then
+    number="${stable_tag#dev-v}"
+    [ "$number" != "$stable_tag" ] || die "--stable-tag must look like dev-v49"
+    if [ -z "${APT_LOCAL_DEBS:-}" ]; then
+        download_tag "$stable_tag"
+    fi
+    for deb in "$all_debs"/*.deb; do
+        version="$(version_of "$deb")"
+        if [ "${version##*.}" = "$number" ]; then
+            stable_version="$version"
+        fi
+    done
+    [ -n "$stable_version" ] || die "$stable_tag has no .deb package to promote"
+elif [ -n "${APT_STABLE_VERSION:-}" ]; then
+    stable_version="$APT_STABLE_VERSION"
+else
+    # Ask the repository what it serves now. A 404 means nothing has been
+    # published yet; any other failure stops here, because guessing wrong
+    # would put an unreviewed build in front of every user.
+    for arch in amd64 arm64; do
+        index="$work/Packages.$arch"
+        status="$(
+            curl -sS -o "$index" -w '%{http_code}' \
+                "$APT_BASE_URL/dists/stable/main/binary-$arch/Packages" || true
+        )"
+        case "$status" in
+            200)
+                latest="$(awk '$1 == "Version:" { print $2 }' "$index" | sort -V | tail -n 1)"
+                if [ -n "$latest" ]; then
+                    stable_version="$latest"
+                    break
+                fi
+                ;;
+            404) ;;
+            *) die "could not read the published stable index (HTTP $status)" ;;
+        esac
+    done
+    if [ -z "$stable_version" ]; then
+        # First publication: there is no stable yet, so the newest build becomes it.
+        stable_version="$(for deb in "$all_debs"/*.deb; do version_of "$deb"; done | sort -V | tail -n 1)"
+        printf 'No stable repository is published yet; using %s.\n' "$stable_version"
+    fi
+fi
+
+# True when one of the collected packages is this exact version.
+have_version() {
+    local deb
+    for deb in "$all_debs"/*.deb; do
+        if [ "$(version_of "$deb")" = "$1" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# The stable version may be older than the releases kept above.
+if ! have_version "$stable_version"; then
+    if [ -z "${APT_LOCAL_DEBS:-}" ]; then
+        download_tag "$(tag_for_version "$stable_version")"
+    fi
+    have_version "$stable_version" || die "no package for the stable version $stable_version"
+fi
+
+# ---- split into the two distributions ----------------------------------
+
+edge_dir="$work/edge"
+stable_dir="$work/stable"
+mkdir -p "$edge_dir" "$stable_dir"
+for deb in "$all_debs"/*.deb; do
+    cp "$deb" "$edge_dir"/
+    if dpkg --compare-versions "$(version_of "$deb")" le "$stable_version"; then
+        cp "$deb" "$stable_dir"/
+    fi
+done
+
+printf 'stable: %s\n' "$(for d in "$stable_dir"/*.deb; do version_of "$d"; done | sort -V | tr '\n' ' ')"
+printf 'edge:   %s\n' "$(for d in "$edge_dir"/*.deb; do version_of "$d"; done | sort -V | tr '\n' ' ')"
+
+# ---- build and sign the repository -------------------------------------
+
+if [ -z "${APTLY:-}" ]; then
+    if command -v aptly >/dev/null; then
+        APTLY="$(command -v aptly)"
+    else
+        # aptly ships .zip releases, and amd64/arm64 in its asset names.
+        case "$(uname -m)" in
+            x86_64) aptly_arch=amd64 ;;
+            aarch64 | arm64) aptly_arch=arm64 ;;
+            *) die "no aptly build for $(uname -m)" ;;
+        esac
+        curl -fsSL -o "$work/aptly.zip" \
+            "https://github.com/aptly-dev/aptly/releases/download/v${APTLY_VERSION}/aptly_${APTLY_VERSION}_linux_${aptly_arch}.zip"
+        unzip -q "$work/aptly.zip" -d "$work/aptly"
+        APTLY="$work/aptly/aptly_${APTLY_VERSION}_linux_${aptly_arch}/aptly"
+    fi
+fi
+
+for distribution in stable edge; do
+    "$APTLY" repo create -distribution="$distribution" -component="main" "forge-super-$distribution" >/dev/null
+    "$APTLY" repo add "forge-super-$distribution" "$work/$distribution"
+    "$APTLY" publish repo -batch -gpg-key="$GPG_FPR" -distribution="$distribution" "forge-super-$distribution"
+done
+
+# The public half of the signing key, and the one-line installer that pins
+# its fingerprint, both served from the root of the repository.
+public="${APTLY_PUBLIC_DIR:-$HOME/.aptly/public}"
+gpg --export --armor "$GPG_FPR" > "$public/mentenaz.gpg"
+install -m 0644 "$repo_root/script/install.sh" "$public/install.sh"

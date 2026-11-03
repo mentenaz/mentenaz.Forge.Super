@@ -6,12 +6,15 @@ set -eu
 # Usage:
 #   curl -fsSL https://downloads.mentenaz-server.com/install.sh | sudo sh
 #   curl -fsSL https://downloads.mentenaz-server.com/install.sh | sudo sh -s -- --repository-only
+#   curl -fsSL https://downloads.mentenaz-server.com/install.sh | sudo sh -s -- --edge
 #
 # Published next to the apt repository by build_installers.yml (it is copied
 # into the tree that gets uploaded), so it always matches the repository it
 # configures.
 
 REPO_URL="https://downloads.mentenaz-server.com"
+# "stable" only moves when a build has been promoted; "edge" gets every build
+# as soon as it is made (see script/publish-apt-repo).
 REPO_DISTRIBUTION="stable"
 REPO_COMPONENT="main"
 REPO_KEY_URL="${REPO_URL}/mentenaz.gpg"
@@ -42,11 +45,14 @@ usage() {
 Mentenaz Forge Super installer
 
 Usage:
-  install.sh [--repository-only] [--help]
+  install.sh [--repository-only] [--edge] [--help]
 
 Options:
   --repository-only  Register the Mentenaz APT repository and update package
                      indexes, but do not install Forge Super.
+  --edge             Follow the "edge" channel, which gets every new build as
+                     soon as it is made, instead of "stable", which only gets
+                     builds that have been promoted.
   --help             Show this help.
 
 This installer supports Debian-based distributions (including Ubuntu and Kali)
@@ -65,6 +71,9 @@ main() {
         case "$1" in
             --repository-only)
                 REPOSITORY_ONLY=1
+                ;;
+            --edge)
+                REPO_DISTRIBUTION="edge"
                 ;;
             --help|-h)
                 usage
