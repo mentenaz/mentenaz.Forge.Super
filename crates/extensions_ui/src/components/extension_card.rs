@@ -7,6 +7,8 @@ use gpui::{Anchor, ElementId, Entity, Point, SharedString, prelude::*};
 use release_channel::ReleaseChannel;
 use ui::{Chip, ContextMenu, PopoverMenu, Tooltip, prelude::*, utils::format_number_with_commas};
 
+type ViewReadmeHandler = Box<dyn Fn(Arc<str>, &mut Window, &mut App) + 'static>;
+
 type ContextMenuBuilder = Box<
     dyn Fn(Arc<str>, SharedString, &mut Window, &mut App) -> Option<Entity<ContextMenu>> + 'static,
 >;
@@ -99,6 +101,7 @@ pub struct ExtensionCard {
     details: ExtensionCardDetails,
     actions: ExtensionCardActions,
     context_menu: Option<ContextMenuBuilder>,
+    view_readme: Option<ViewReadmeHandler>,
 }
 
 impl ExtensionCard {
@@ -149,6 +152,7 @@ impl ExtensionCard {
             details,
             actions,
             context_menu: None,
+            view_readme: None,
         }
     }
 
@@ -173,6 +177,7 @@ impl ExtensionCard {
             details,
             actions,
             context_menu: None,
+            view_readme: None,
         }
     }
 
@@ -404,6 +409,16 @@ impl ExtensionCard {
         self
     }
 
+    /// Adds a button that opens the extension's README. The handler gets the
+    /// extension's id.
+    pub fn on_view_readme(
+        mut self,
+        handler: impl Fn(Arc<str>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.view_readme = Some(Box::new(handler));
+        self
+    }
+
     pub fn context_menu(
         mut self,
         builder: impl Fn(Arc<str>, SharedString, &mut Window, &mut App) -> Option<Entity<ContextMenu>>
@@ -597,6 +612,7 @@ impl RenderOnce for ExtensionCard {
             details,
             actions,
             context_menu,
+            view_readme,
         } = self;
         let ExtensionCardDetails {
             id,
@@ -614,6 +630,8 @@ impl RenderOnce for ExtensionCard {
         let is_dev = source.is_dev();
         let is_overridden = source.is_overridden();
         let repository_button_id = SharedString::from(format!("repository-{id}"));
+        let readme_button_id = SharedString::from(format!("readme-{id}"));
+        let readme_extension_id = id.clone();
         let context_menu_button_id = SharedString::from(format!("more-{id}"));
         let context_menu_extension_id = id;
         let context_menu_authors = authors.clone();
@@ -712,6 +730,20 @@ impl RenderOnce for ExtensionCard {
                             h_flex()
                                 .gap_1()
                                 .flex_shrink_0()
+                                .when_some(view_readme, |this, view_readme| {
+                                    this.child(
+                                        IconButton::new(readme_button_id, IconName::FileDoc)
+                                            .icon_size(IconSize::Small)
+                                            .tooltip(Tooltip::text("View README"))
+                                            .on_click(move |_, window, cx| {
+                                                view_readme(
+                                                    readme_extension_id.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }),
+                                    )
+                                })
                                 .when_some(repository_url, |this, repository_url| {
                                     let repository_url_for_tooltip = repository_url.clone();
                                     this.child(

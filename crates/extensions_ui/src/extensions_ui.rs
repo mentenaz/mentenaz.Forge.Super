@@ -1,4 +1,5 @@
 mod components;
+mod extension_readme;
 mod extension_suggestions;
 mod extension_version_selector;
 
@@ -46,6 +47,7 @@ use workspace::{
 use zed_actions::ExtensionCategoryFilter;
 
 use crate::components::{ExtensionCard, extension_provides_label};
+use crate::extension_readme::ExtensionReadmeView;
 use crate::extension_version_selector::{
     ExtensionVersionSelector, ExtensionVersionSelectorDelegate,
 };
@@ -769,6 +771,16 @@ impl ExtensionsPage {
         extension_store: &ExtensionStore,
         cx: &Context<Self>,
     ) -> Option<ExtensionCard> {
+        let weak_self = cx.weak_entity();
+        let view_readme = {
+            let weak_self = weak_self.clone();
+            move |extension_id: Arc<str>, window: &mut Window, cx: &mut App| {
+                weak_self
+                    .update(cx, |this, cx| this.view_readme(extension_id, window, cx))
+                    .ok();
+            }
+        };
+
         let remote_index = match row {
             DisplayedExtension::Installed {
                 index,
@@ -780,10 +792,12 @@ impl ExtensionsPage {
                     .repository
                     .as_deref()
                     .map(|url| self.get_repository_icon(url));
+                // A dev extension is not in the registry, so it has no README there.
                 let card = if extension.dev {
                     ExtensionCard::for_dev(manifest, extension_store)
                 } else {
                     ExtensionCard::for_installed(manifest, extension_store)
+                        .on_view_readme(view_readme)
                 };
                 return Some(match repository_icon {
                     Some(icon) => card.repository_icon(icon),
@@ -798,10 +812,10 @@ impl ExtensionsPage {
         };
 
         let extension = self.remote_extensions.get(remote_index)?;
-        let weak_self = cx.weak_entity();
         Some(
             ExtensionCard::for_remote(extension, extension_store, cx)
                 .repository_icon(self.get_repository_icon(&extension.manifest.repository))
+                .on_view_readme(view_readme)
                 .context_menu(move |extension_id, authors, window, cx| {
                     let this = weak_self.upgrade()?;
                     Some(Self::render_remote_extension_context_menu(
@@ -834,6 +848,14 @@ impl ExtensionsPage {
                         }
                     }),
                 )
+                .entry(
+                    "View README",
+                    None,
+                    window.handler_for(this, {
+                        let extension_id = extension_id.clone();
+                        move |this, window, cx| this.view_readme(extension_id.clone(), window, cx)
+                    }),
+                )
                 .entry("Copy Extension ID", None, {
                     let extension_id = extension_id.clone();
                     move |_, cx| {
@@ -844,6 +866,29 @@ impl ExtensionsPage {
                     cx.write_to_clipboard(ClipboardItem::new_string(authors.to_string()));
                 })
         })
+    }
+
+    /// Opens the extension's README in a tab.
+    fn view_readme(&mut self, extension_id: Arc<str>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+
+        let name: SharedString = self
+            .remote_extensions
+            .iter()
+            .find(|extension| extension.id == extension_id)
+            .map(|extension| extension.manifest.name.clone().into())
+            .unwrap_or_else(|| extension_id.to_string().into());
+
+        // Not opened right here: this runs while the page is being updated, and adding
+        // a tab makes the workspace read every open tab, this page included.
+        cx.spawn_in(window, async move |_, cx| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                ExtensionReadmeView::open(workspace, extension_id, name, window, cx)
+            })
+        })
+        .detach_and_log_err(cx);
     }
 
     fn show_extension_version_list(

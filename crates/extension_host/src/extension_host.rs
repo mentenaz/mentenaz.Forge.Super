@@ -192,6 +192,26 @@ enum RemoteSyncSignal {
     Reconnected,
 }
 
+/// An extension's README as the registry stores it.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ExtensionReadme {
+    /// The Markdown text. `None` when the registry has not captured one, and an
+    /// empty string when the extension has none.
+    #[serde(default)]
+    pub readme: Option<String>,
+    /// Where relative images in the README live (raw files, at the built commit).
+    #[serde(default)]
+    pub readme_raw_base: Option<String>,
+    /// Where relative links in the README point (file pages, at the built commit).
+    #[serde(default)]
+    pub readme_blob_base: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GetExtensionReadmeResponse {
+    data: ExtensionReadme,
+}
+
 #[derive(Clone, Copy)]
 pub enum ExtensionOperation {
     Upgrade,
@@ -763,6 +783,56 @@ impl ExtensionStore {
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<ExtensionMetadata>>> {
         self.fetch_extensions_from_api(&format!("/extensions/{extension_id}"), &[], cx)
+    }
+
+    /// Fetches the README that the registry holds for an extension's latest
+    /// version, so it can be read before the extension is installed.
+    pub fn fetch_extension_readme(
+        &self,
+        extension_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<ExtensionReadme>> {
+        // The id goes into a URL path, so anything outside what an extension id
+        // is made of is refused rather than escaped.
+        if extension_id.is_empty()
+            || !extension_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Task::ready(Err(anyhow!("not a valid extension id: {extension_id:?}")));
+        }
+
+        let url = self
+            .http_client
+            .build_forge_extensions_url(&format!("/extensions/{extension_id}/readme"), &[]);
+        let http_client = self.http_client.clone();
+        cx.spawn(async move |_, _| {
+            let mut response = http_client
+                .get(url?.as_ref(), AsyncBody::empty(), true)
+                .await?;
+
+            let mut body = Vec::new();
+            response
+                .body_mut()
+                .read_to_end(&mut body)
+                .await
+                .context("error reading the extension's README")?;
+
+            // The registry has no such extension, so there is no README either.
+            if response.status() == http_client::http::StatusCode::NOT_FOUND {
+                return Ok(ExtensionReadme::default());
+            }
+            if !response.status().is_success() {
+                bail!(
+                    "status error {}, response: {:?}",
+                    response.status().as_u16(),
+                    String::from_utf8_lossy(&body)
+                );
+            }
+
+            let response: GetExtensionReadmeResponse = serde_json::from_slice(&body)?;
+            Ok(response.data)
+        })
     }
 
     /// Installs any extensions that should be included with Zed by default.
