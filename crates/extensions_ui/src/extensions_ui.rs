@@ -105,6 +105,9 @@ fn update_rebuild_dev_extension_visibility(store: &Entity<ExtensionStore>, cx: &
     });
 }
 
+/// Identifies the notification shown when an install the user asked for fails.
+struct ExtensionInstallFailure;
+
 pub fn init(cx: &mut App) {
     let store = ExtensionStore::global(cx);
     update_rebuild_dev_extension_visibility(&store, cx);
@@ -122,7 +125,6 @@ pub fn init(cx: &mut App) {
             message,
         } = event
         {
-            struct ExtensionInstallFailure;
             let message = message.clone();
             show_app_notification(
                 NotificationId::composite::<ExtensionInstallFailure>(extension_id.to_string()),

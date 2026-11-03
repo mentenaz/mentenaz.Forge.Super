@@ -582,9 +582,16 @@ mod tests {
 
         open_file(&workspace, "index.html", cx).await;
 
+        // The install failed on request, so the failure is reported, and the
+        // suggestion is offered again.
         assert_eq!(
             notification_ids(&workspace, cx),
-            vec![notification_id(EMMET_EXTENSION_ID)]
+            vec![
+                NotificationId::composite::<crate::ExtensionInstallFailure>(
+                    EMMET_EXTENSION_ID.to_string()
+                ),
+                notification_id(EMMET_EXTENSION_ID)
+            ]
         );
     }
 

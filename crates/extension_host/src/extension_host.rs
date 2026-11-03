@@ -167,6 +167,10 @@ pub struct ExtensionStore {
     pub installed_dir: PathBuf,
     pub staging_dir: PathBuf,
     pub outstanding_operations: BTreeMap<Arc<str>, ExtensionOperation>,
+    /// Installs and upgrades the store started by itself, such as the extensions
+    /// installed automatically at startup. A failure there is only logged: nobody
+    /// asked for it, and going offline would otherwise greet every launch with an error.
+    background_operations: HashSet<Arc<str>>,
     pub index_path: PathBuf,
     pub modified_extensions: HashSet<Arc<str>>,
     pub wasm_host: Arc<WasmHost>,
@@ -413,6 +417,7 @@ impl ExtensionStore {
             index_path,
             builder: Arc::new(ExtensionBuilder::new(builder_client, build_dir)),
             outstanding_operations: Default::default(),
+            background_operations: Default::default(),
             modified_extensions: Default::default(),
             reload_complete_senders: Vec::new(),
             wasm_host: WasmHost::new(
@@ -788,12 +793,22 @@ impl ExtensionStore {
         cx.spawn(async move |this, cx| {
             for extension_id in extensions_to_install {
                 this.update(cx, |this, cx| {
+                    this.mark_background_operation(&extension_id);
                     this.install_latest_extension(extension_id.clone(), cx);
                 })
                 .ok();
             }
         })
         .detach();
+    }
+
+    /// Notes that the operation about to start on `extension_id` is the store's own
+    /// doing, so its failure is not reported to the user.
+    fn mark_background_operation(&mut self, extension_id: &Arc<str>) {
+        // One already under way belongs to whoever started it.
+        if !self.outstanding_operations.contains_key(extension_id) {
+            self.background_operations.insert(extension_id.clone());
+        }
     }
 
     pub fn check_for_updates(&mut self, cx: &mut Context<Self>) {
@@ -821,6 +836,7 @@ impl ExtensionStore {
                     }
                 }
 
+                this.mark_background_operation(&extension.id);
                 Some(this.upgrade_extension(extension.id, extension.manifest.version, cx))
             })?;
 
@@ -902,6 +918,7 @@ impl ExtensionStore {
                 let extension_id = extension_id.clone();
                 move |this, cx| {
                     this.outstanding_operations.remove(extension_id.as_ref());
+                    this.background_operations.remove(extension_id.as_ref());
                     cx.notify();
                 }
             });
@@ -989,7 +1006,10 @@ impl ExtensionStore {
             if let Err(error) = download.await {
                 log::error!("failed to install extension {extension_id}: {error:#}");
                 let message = install_failure_message(&extension_id, &error);
-                this.update(cx, |_, cx| {
+                this.update(cx, |this, cx| {
+                    if this.background_operations.contains(extension_id.as_ref()) {
+                        return;
+                    }
                     cx.emit(Event::ExtensionFailedToInstall {
                         extension_id: extension_id.clone(),
                         message,
