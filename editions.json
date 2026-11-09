@@ -21,6 +21,7 @@
       "command": "forge-super",
       "ipc": "Forge-Super-Editor",
       "id": "dev.forge.super",
+      "package_identity": "Mentenaz.Forge.Super",
       "scheme": "forgesuper"
     },
     "forge-lite": {
