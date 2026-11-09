@@ -766,9 +766,34 @@ mod tests {
 
         let end = run_workflow_controlled(def, PathBuf::from("."), status, RunControl::new()).await;
 
-        assert_eq!(end, RunEnd::Completed);
-        assert!(saw(&events, "short-lived", RunStatus::Ready));
-        assert!(saw(&events, "short-lived", RunStatus::Succeeded));
+        // What actually happened, for a failure message: the events, and what
+        // each process of this node was and printed.
+        let what_happened = || {
+            let registry = process_tracker::registry();
+            let processes: Vec<_> = registry
+                .list()
+                .iter()
+                .filter(|p| p.action_id == "short-lived")
+                .map(|p| (format!("{:?}", p.status), registry.log_snapshot(&p.id)))
+                .collect();
+            format!(
+                "end: {end:?}
+events: {:?}
+processes: {processes:?}",
+                events.lock().unwrap()
+            )
+        };
+        assert_eq!(end, RunEnd::Completed, "{}", what_happened());
+        assert!(
+            saw(&events, "short-lived", RunStatus::Ready),
+            "{}",
+            what_happened()
+        );
+        assert!(
+            saw(&events, "short-lived", RunStatus::Succeeded),
+            "{}",
+            what_happened()
+        );
     }
 
     #[tokio::test]
@@ -806,6 +831,40 @@ mod tests {
         assert!(saw(&events, "never-started", RunStatus::Skipped));
         assert!(!saw(&events, "never-started", RunStatus::Running));
         assert!(!any_running("never-started"));
+    }
+
+    #[tokio::test]
+    async fn a_commands_output_reaches_the_runs_sink_with_its_node_id() {
+        let (command, args) = exits_later(0, "hello from the run");
+        let def = flow(
+            "run-output",
+            vec![("talker", start_node(command, args, vec![]))],
+        );
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = lines.clone();
+        let sink = StatusSink::none().with_output(move |_scope, id, _stream, line| {
+            seen.lock().unwrap().push(format!("{id}: {line}"))
+        });
+
+        let end = run_workflow_controlled(def, PathBuf::from("."), sink, RunControl::new()).await;
+
+        assert_eq!(end, RunEnd::Completed);
+        // The forwarder is a separate task: give it a moment.
+        for _ in 0..60 {
+            if lines
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("talker: hello from the run"))
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!(
+            "the output never reached the sink: {:?}",
+            lines.lock().unwrap()
+        );
     }
 
     #[tokio::test]

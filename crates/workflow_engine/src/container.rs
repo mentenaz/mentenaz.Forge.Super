@@ -77,7 +77,10 @@ pub fn execute_action<'a, 'r: 'a>(
         let outcome = if registry::is_container(&action.type_id) {
             execute_container(action_id, action, ctx, solution_root, status).await
         } else {
-            execute_leaf(action_id, action, ctx, solution_root).await
+            // The leaf gets this node's sink, so it can pass on what is not a
+            // status change (a command's output).
+            let leaf_ctx = ctx.clone().with_status_sink(status.clone());
+            execute_leaf(action_id, action, &leaf_ctx, solution_root).await
         };
         let (phase, detail) = match &outcome {
             Ok(outputs) => {

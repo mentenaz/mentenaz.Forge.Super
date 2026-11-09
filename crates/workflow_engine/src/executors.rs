@@ -11,11 +11,13 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Map, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command as TokioCommand;
+use tokio::sync::broadcast;
 
 use crate::async_rt::on_tokio;
 
@@ -23,6 +25,7 @@ use super::engine::{RunContext, VariableType};
 use super::process_tracker;
 use super::run_control::{RunControl, STOPPED_MESSAGE};
 use super::schema::{Action, ScriptRuntime, ScriptSource};
+use super::status::{OutputStream, StatusSink};
 
 /// Leaf-action dispatch. `Err` means the action resolved `Failed` (the
 /// scheduler, not this function, decides what that means for `runAfter`
@@ -967,6 +970,54 @@ fn waiting_for(settings: &ReadySettings, progress: &ReadyProgress) -> Vec<String
     waiting
 }
 
+/// How long the output forwarder waits for a line before checking whether the
+/// process has ended.
+const OUTPUT_FORWARD_IDLE: Duration = Duration::from_millis(300);
+
+/// How long after the last line the forwarder keeps listening once the
+/// process has ended, for what is still on its way from the pipes.
+const OUTPUT_FORWARD_DRAIN: Duration = Duration::from_millis(200);
+
+/// Hands `sink` each line the process prints, as it arrives, until the process
+/// has ended and its last lines have been passed on. `lines` must have been
+/// subscribed before the output readers started, or the first lines are lost.
+fn forward_output(
+    registry: Arc<process_tracker::ProcessRegistry>,
+    process_id: String,
+    action_id: String,
+    sink: StatusSink,
+    mut lines: broadcast::Receiver<String>,
+) {
+    // The registry keeps stderr lines marked with `"! "`.
+    fn pass_on(sink: &StatusSink, action_id: &str, line: &str) {
+        match line.strip_prefix("! ") {
+            Some(text) => sink.report_output(action_id, OutputStream::Stderr, text),
+            None => sink.report_output(action_id, OutputStream::Stdout, line),
+        }
+    }
+
+    tokio::spawn(async move {
+        loop {
+            match tokio::time::timeout(OUTPUT_FORWARD_IDLE, lines.recv()).await {
+                Ok(Ok(line)) => pass_on(&sink, &action_id, &line),
+                // Lines were dropped because this fell behind: carry on.
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
+                Ok(Err(broadcast::error::RecvError::Closed)) => return,
+                Err(_) if registry.exit_code_if_exited(&process_id).is_some() => break,
+                Err(_) => {}
+            }
+        }
+        // The process has ended; pass on what was still in flight.
+        while let Ok(received) = tokio::time::timeout(OUTPUT_FORWARD_DRAIN, lines.recv()).await {
+            match received {
+                Ok(line) => pass_on(&sink, &action_id, &line),
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+}
+
 /// The outputs every `StartProcess` result has.
 fn process_outputs(pid: Option<u32>, process_id: &str) -> Map<String, Value> {
     let mut outputs = Map::new();
@@ -1054,6 +1105,21 @@ async fn wait_for_start(
         }
         if let Some(code) = registry.exit_code_if_exited(process_id) {
             tokio::time::sleep(OUTPUT_DRAIN).await;
+            // The output may only have been read just now. A process that
+            // printed what it was waited for and then ended was ready: the run
+            // reports how it ended.
+            if !settings.is_empty()
+                && check_ready(
+                    settings,
+                    &mut progress,
+                    client.as_ref(),
+                    registry,
+                    process_id,
+                )
+                .await
+            {
+                return Ok(running_outputs(pid, process_id, progress.port));
+            }
             return finished(registry, process_id, pid, command_line, code);
         }
         if !settings.is_empty() {
@@ -1156,6 +1222,11 @@ async fn execute_start_process(
     let action_id = action_id.to_string();
     let owner = ctx.process_owner().cloned();
     let control = ctx.control().clone();
+    // Only a caller that asked for output gets it forwarded.
+    let output = ctx
+        .status_sink()
+        .filter(|sink| sink.wants_output())
+        .cloned();
 
     on_tokio(async move {
         if let Some(owner) = &owner {
@@ -1221,12 +1292,20 @@ async fn execute_start_process(
             .collect::<Vec<_>>()
             .join(" ");
         let registry = process_tracker::registry();
+        let report_id = action_id.clone();
         let process_id = registry.register_owned(owner, action_id, command, args, url, child);
+        // Subscribed before the readers start, so the first lines are not lost.
+        let lines = output
+            .as_ref()
+            .and_then(|_| registry.subscribe_log(&process_id));
         if let Some(stdout) = stdout {
             process_tracker::spawn_log_reader(process_id.clone(), stdout, false);
         }
         if let Some(stderr) = stderr {
             process_tracker::spawn_log_reader(process_id.clone(), stderr, true);
+        }
+        if let (Some(sink), Some(lines)) = (output, lines) {
+            forward_output(registry.clone(), process_id.clone(), report_id, sink, lines);
         }
 
         wait_for_start(&registry, &process_id, pid, &command_line, &ready, &control).await
@@ -1827,6 +1906,102 @@ mod tests {
             .unwrap();
     }
 
+    type SeenOutput = Arc<Mutex<Vec<(String, OutputStream, String)>>>;
+
+    /// A status sink that collects the output lines it is given.
+    fn collecting_output_sink() -> (StatusSink, SeenOutput) {
+        let seen: SeenOutput = Arc::new(Mutex::new(Vec::new()));
+        let seen_in_sink = seen.clone();
+        let sink = StatusSink::none().with_output(move |_scope, action_id, stream, line| {
+            seen_in_sink
+                .lock()
+                .unwrap()
+                .push((action_id.to_string(), stream, line.to_string()))
+        });
+        (sink, seen)
+    }
+
+    /// Waits (the forwarder is a separate task) for a line containing `needle`.
+    async fn wait_for_line(
+        seen: &SeenOutput,
+        needle: &str,
+    ) -> Option<(String, OutputStream, String)> {
+        for _ in 0..80 {
+            if let Some(found) = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(_, _, line)| line.contains(needle))
+                .cloned()
+            {
+                return Some(found);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn a_commands_output_is_passed_to_the_sink_while_it_runs() {
+        let (sink, seen) = collecting_output_sink();
+        let ctx = RunContext::new().with_status_sink(sink);
+        let (command, args) = prints_then_runs("hello from the server");
+        let action = start_action(
+            command,
+            args,
+            vec![("ready_text", Value::from("hello from"))],
+        );
+
+        let outputs = execute_start_process("chatty", &ctx, &action, root())
+            .await
+            .unwrap();
+
+        let found = wait_for_line(&seen, "hello from the server")
+            .await
+            .expect("the line was never passed on");
+        assert_eq!(found.0, "chatty");
+        assert_eq!(found.1, OutputStream::Stdout);
+        process_tracker::registry()
+            .stop(&process_id_of(&outputs))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stderr_lines_are_marked_as_stderr_and_lose_the_registrys_mark() {
+        let (sink, seen) = collecting_output_sink();
+        let ctx = RunContext::new().with_status_sink(sink);
+        let (command, args) = failing_command(3);
+        let action = start_action(command, args, vec![]);
+
+        // The command fails; its output is still passed on.
+        let _ = execute_start_process("noisy", &ctx, &action, root()).await;
+
+        let found = wait_for_line(&seen, "boom")
+            .await
+            .expect("the line was never passed on");
+        assert_eq!(found.1, OutputStream::Stderr);
+        assert!(!found.2.starts_with("! "), "{:?}", found.2);
+    }
+
+    #[tokio::test]
+    async fn a_sink_that_did_not_ask_for_output_gets_none_and_the_node_still_works() {
+        let seen: SeenOutput = Arc::new(Mutex::new(Vec::new()));
+        // A status sink with no output callback.
+        let ctx = RunContext::new().with_status_sink(StatusSink::new(|_, _, _| {}));
+        let (command, args) = prints_then_runs("nobody is listening");
+        let action = start_action(command, args, vec![("ready_text", Value::from("nobody"))]);
+
+        let outputs = execute_start_process("quiet", &ctx, &action, root())
+            .await
+            .unwrap();
+
+        assert_eq!(outputs.get("ready"), Some(&Value::Bool(true)));
+        assert!(seen.lock().unwrap().is_empty());
+        process_tracker::registry()
+            .stop(&process_id_of(&outputs))
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn ready_url_waits_for_a_good_answer() {
         let url = mock_status_server(&[500, 200]).await;
@@ -1907,6 +2082,31 @@ mod tests {
             started.elapsed() < Duration::from_secs(10),
             "it waited for the timeout instead of noticing the exit"
         );
+    }
+
+    #[tokio::test]
+    async fn a_process_that_printed_its_ready_text_and_then_ended_was_ready() {
+        #[cfg(target_os = "windows")]
+        let (command, args) = (
+            "cmd",
+            vec!["/C".to_string(), "echo all systems go".to_string()],
+        );
+        #[cfg(not(target_os = "windows"))]
+        let (command, args) = (
+            "sh",
+            vec!["-c".to_string(), "echo all systems go".to_string()],
+        );
+        let action = start_action(
+            command,
+            args,
+            vec![("ready_text", Value::from("systems go"))],
+        );
+
+        let outputs = execute_start_process("brief", &RunContext::new(), &action, root())
+            .await
+            .unwrap();
+
+        assert_eq!(outputs.get("ready"), Some(&Value::Bool(true)));
     }
 
     #[tokio::test]

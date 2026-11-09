@@ -16,6 +16,7 @@ use serde_json::{Map, Value};
 
 use super::process_tracker::ProcessOwner;
 use super::run_control::RunControl;
+use super::status::StatusSink;
 
 /// Reserved data-context key for a `Foreach` iteration's loop variable —
 /// see the design doc §1's "Locked" note. Not a valid action id (action ids
@@ -146,6 +147,10 @@ pub struct RunContext {
     /// This run's stop flag and the servers it has started. Shared by every
     /// context derived from this one.
     control: RunControl,
+    /// The sink of the node currently being run, set for a leaf executor so it
+    /// can report what is not a status change, such as a command's output.
+    /// `None` outside `execute_action`.
+    status_sink: Option<StatusSink>,
 }
 
 impl RunContext {
@@ -158,6 +163,7 @@ impl RunContext {
             engine: Arc::new(Engine::new()),
             process_owner: None,
             control: RunControl::new(),
+            status_sink: None,
         }
     }
 
@@ -182,6 +188,17 @@ impl RunContext {
 
     pub fn control(&self) -> &RunControl {
         &self.control
+    }
+
+    /// Gives a leaf executor the sink of the node it runs for. See
+    /// [`Self::status_sink`].
+    pub fn with_status_sink(mut self, sink: StatusSink) -> Self {
+        self.status_sink = Some(sink);
+        self
+    }
+
+    pub fn status_sink(&self) -> Option<&StatusSink> {
+        self.status_sink.as_ref()
     }
 
     /// Whether the run was asked to stop.
@@ -333,6 +350,7 @@ impl RunContext {
             engine: self.engine.clone(),
             process_owner: self.process_owner.clone(),
             control: self.control.clone(),
+            status_sink: None,
         }
     }
 
