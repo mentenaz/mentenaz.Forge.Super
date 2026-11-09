@@ -20,7 +20,7 @@ use serde_json::{Map, Value};
 use super::engine::RunContext;
 use super::executors::execute_leaf;
 use super::registry;
-use super::run_control::Service;
+use super::run_control::{LinkHints, Service};
 use super::scheduler::run_level;
 use super::schema::{Action, RunOutcome};
 use super::status::{IterationScope, RunStatus, StatusSink};
@@ -48,6 +48,28 @@ fn running_service(action: &Action, outputs: &Map<String, Value>) -> Option<Stri
         .get("processId")
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+/// Where a `StartProcess` node says its server can be reached.
+fn link_hints(action: &Action) -> LinkHints {
+    let text = |field: &str| {
+        action
+            .inputs
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    LinkHints {
+        url: text("url"),
+        ready_url: text("ready_url"),
+        ready_port: action
+            .inputs
+            .get("ready_port")
+            .and_then(Value::as_u64)
+            .and_then(|port| u16::try_from(port).ok()),
+    }
 }
 
 /// Dispatches one action to either a leaf executor (§4) or a container
@@ -92,6 +114,12 @@ pub fn execute_action<'a, 'r: 'a>(
                 if let Some(process_id) = running_service(action, outputs) {
                     ctx.control().add_service(Service {
                         action_id: action_id.to_string(),
+                        name: action
+                            .label
+                            .clone()
+                            .filter(|label| !label.trim().is_empty())
+                            .unwrap_or_else(|| action_id.to_string()),
+                        hints: link_hints(action),
                         process_id,
                         status: status.clone(),
                     });

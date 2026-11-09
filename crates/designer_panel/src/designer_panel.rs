@@ -71,7 +71,7 @@ use project::Project;
 use run_state::{ActionRun, LineKind, RunLogLine, RunPhase, RunState, SharedRunState};
 use workflow_engine::{
     ActionHistoryRecord, FieldKind, InputField, RunControl, RunEnd, RunHistoryEntry, RunOutcome,
-    RunStatus, ScriptRuntime, ScriptSource, StatusSink, ValidationIssue, ValidationSeverity,
+    RunStatus, ScriptRuntime, ScriptSource, ServiceLink, StatusSink, ValidationIssue, ValidationSeverity,
     WorkflowDefinition, registry::REGISTRY, run_workflow_controlled, validate_definition,
 };
 use workspace::{
@@ -5805,6 +5805,7 @@ impl DesignerPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.on_toggle_log_click(cx))),
                     ),
             )
+            .children(self.render_services(cx))
             .child(
                 div()
                     .relative()
@@ -5822,6 +5823,111 @@ impl DesignerPanel {
                     )
                     .child(Scrollbar::vertical(&self.log_scroll)),
             )
+    }
+
+    /// The servers the live run has up and where to reach each, above the
+    /// transcript. `None` while there are none.
+    fn render_services(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let links = self.run_control.as_ref()?.service_links();
+        if links.is_empty() {
+            return None;
+        }
+        Some(
+            v_flex()
+                .w_full()
+                .flex_shrink_0()
+                .px_3()
+                .py_1()
+                .gap_0p5()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .children(
+                    links
+                        .iter()
+                        .enumerate()
+                        .map(|(i, link)| self.render_service_row(i, link, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// One running server: its name, where to reach it, and buttons to open
+    /// (an `http(s)` address only) and copy that address.
+    fn render_service_row(
+        &self,
+        index: usize,
+        link: &ServiceLink,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let address = link.address.clone();
+        let open_address = address.clone();
+        let copy_address = address.clone();
+        h_flex()
+            .w_full()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .size_1p5()
+                    .rounded_full()
+                    .flex_shrink_0()
+                    .bg(cx.theme().success),
+            )
+            .child(
+                div()
+                    .w(px(110.0))
+                    .flex_shrink_0()
+                    .truncate()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(cx.theme().foreground)
+                    .child(format!("{}:", link.name)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .font_family("monospace")
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        address
+                            .clone()
+                            .unwrap_or_else(|| "no address known".to_string()),
+                    ),
+            )
+            .when(link.openable, |row| {
+                row.child(
+                    Button::new(SharedString::from(format!("designer-service-open-{index}")))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ExternalLink)
+                        .tooltip("Open in the browser")
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            if let Some(address) = &open_address {
+                                cx.open_url(address);
+                            }
+                        })),
+                )
+            })
+            .when(address.is_some(), |row| {
+                row.child(
+                    Button::new(SharedString::from(format!("designer-service-copy-{index}")))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Copy)
+                        .tooltip("Copy the address")
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            if let Some(address) = &copy_address {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    address.clone(),
+                                ));
+                            }
+                        })),
+                )
+            })
+            .into_any_element()
     }
 
     fn render_log_row(

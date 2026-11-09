@@ -112,6 +112,13 @@ none is left. Three things end it sooner:
 
 `run_workflow` is the same without a handle, so it cannot be stopped.
 
+**Where the servers are.** `RunControl::service_links()` lists the servers a
+run has up, each with an address for the UI to show. The address is the node's
+`url`, else the first `http(s)` address on this machine that the server printed
+(`Local: http://127.0.0.1:5173/`; `0.0.0.0` is shown as `localhost`), else
+`ready_url`, else `localhost:` and `ready_port`. A server with only a port has
+no browser link, only the address to copy.
+
 **Servers do not outlive the app.** Closing a Designer tab or the Flows panel
 stops the runs it started. Quitting calls `stop_all_processes`, and on Windows
 every started process is also put in a job object that is killed when the app

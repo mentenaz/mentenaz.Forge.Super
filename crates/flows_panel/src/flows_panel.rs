@@ -57,7 +57,7 @@ use project::Project;
 use settings::{DockSide, Settings as _};
 use workflow_engine::{
     ActionHistoryRecord, ActionMap, DetectedService, RunControl, RunEnd, RunHistoryEntry,
-    RunOutcome, RunStatus, ServiceSpec, StatusSink, WorkflowDefinition, run_workflow_controlled,
+    RunOutcome, RunStatus, ServiceLink, ServiceSpec, StatusSink, WorkflowDefinition, run_workflow_controlled,
     scan_project, task_chain,
 };
 pub use flows_panel_settings::FlowsPanelSettings;
@@ -678,6 +678,28 @@ impl FlowsPanel {
 
         let store = db::kvp::KeyValueStore::from_app_db(cx.global::<db::AppDatabase>());
 
+        let live_id = id.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                let live = this
+                    .update(cx, |this, cx| {
+                        let live = this.running.contains(&live_id);
+                        if live {
+                            cx.notify();
+                        }
+                        live
+                    })
+                    .unwrap_or(false);
+                if !live {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         cx.spawn_in(window, async move |this, cx| {
             let end = run_workflow_controlled(def, root, status, control).await;
             // A stopped run is not a failure: its servers did what they were
@@ -708,6 +730,112 @@ impl FlowsPanel {
             });
         })
         .detach();
+    }
+
+    /// The servers a live run of `entry` has up, under its row. `None` while
+    /// there are none.
+    fn render_services(
+        &self,
+        entry: &WorkflowEntry,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let links = self.run_controls.get(&entry.id)?.service_links();
+        if links.is_empty() {
+            return None;
+        }
+        Some(
+            v_flex()
+                .w_full()
+                .px_3()
+                .pb_2()
+                .gap_0p5()
+                .children(
+                    links
+                        .iter()
+                        .enumerate()
+                        .map(|(i, link)| self.render_service_row(i, link, cx)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// One running server: its name, where to reach it, and buttons to open
+    /// (an `http(s)` address only) and copy that address.
+    fn render_service_row(
+        &self,
+        index: usize,
+        link: &ServiceLink,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let address = link.address.clone();
+        let open_address = address.clone();
+        let copy_address = address.clone();
+        h_flex()
+            .w_full()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .size_1p5()
+                    .rounded_full()
+                    .flex_shrink_0()
+                    .bg(cx.theme().success),
+            )
+            .child(
+                div()
+                    .w(px(110.0))
+                    .flex_shrink_0()
+                    .truncate()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(cx.theme().foreground)
+                    .child(format!("{}:", link.name)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .font_family("monospace")
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        address
+                            .clone()
+                            .unwrap_or_else(|| "no address known".to_string()),
+                    ),
+            )
+            .when(link.openable, |row| {
+                row.child(
+                    Button::new(SharedString::from(format!("flow-service-open-{index}")))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ExternalLink)
+                        .tooltip("Open in the browser")
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            if let Some(address) = &open_address {
+                                cx.open_url(address);
+                            }
+                        })),
+                )
+            })
+            .when(address.is_some(), |row| {
+                row.child(
+                    Button::new(SharedString::from(format!("flow-service-copy-{index}")))
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Copy)
+                        .tooltip("Copy the address")
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            if let Some(address) = &copy_address {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    address.clone(),
+                                ));
+                            }
+                        })),
+                )
+            })
+            .into_any_element()
     }
 
     fn render_row(&self, entry: &WorkflowEntry, cx: &mut Context<Self>) -> impl IntoElement {
@@ -967,7 +1095,13 @@ impl Render for FlowsPanel {
             let rows: Vec<_> = self
                 .entries
                 .iter()
-                .map(|entry| self.render_row(entry, cx).into_any_element())
+                .map(|entry| {
+                    v_flex()
+                        .w_full()
+                        .child(self.render_row(entry, cx))
+                        .children(self.render_services(entry, cx))
+                        .into_any_element()
+                })
                 .collect();
             v_flex().w_full().children(rows).into_any_element()
         };
