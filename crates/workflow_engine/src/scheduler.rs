@@ -222,6 +222,12 @@ where
         let mut still_pending = VecDeque::new();
         while let Some(id) = pending.pop_front() {
             let action = &actions[id];
+            // A stopped run starts nothing new: whatever is still waiting is
+            // skipped.
+            if ctx.is_stopped() {
+                outcomes.insert(id.clone(), RunOutcome::Skipped);
+                continue;
+            }
             let deps_resolved = action
                 .run_after
                 .keys()
@@ -304,6 +310,20 @@ mod tests {
         _ctx: &RunContext,
     ) -> impl Future<Output = Result<Map<String, Value>, String>> {
         std::future::ready(Ok(Map::new()))
+    }
+
+    #[tokio::test]
+    async fn a_stopped_run_starts_nothing_new() {
+        let (id_a, a) = action_after("a", &[]);
+        let (id_b, b) = action_after("b", &[("a", &[RO::Succeeded])]);
+        let actions = map_of(vec![(id_a, a), (id_b, b)]);
+        let ctx = RunContext::new();
+        ctx.control().stop();
+
+        let result = run_level(&actions, &ctx, |_, _, _| async { Ok(Map::new()) }).await;
+
+        assert_eq!(result.outcomes.get("a"), Some(&RunOutcome::Skipped));
+        assert_eq!(result.outcomes.get("b"), Some(&RunOutcome::Skipped));
     }
 
     #[test]

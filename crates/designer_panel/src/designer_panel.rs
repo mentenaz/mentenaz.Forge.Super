@@ -2530,6 +2530,7 @@ impl DesignerPanel {
         let status = StatusSink::with_scope(move |scope, action_id, status, detail| {
             let phase = match status {
                 RunStatus::Running => RunPhase::Running,
+                RunStatus::Ready => RunPhase::Running,
                 RunStatus::Succeeded => RunPhase::Succeeded,
                 RunStatus::Failed => RunPhase::Failed,
                 RunStatus::Skipped => RunPhase::Skipped,

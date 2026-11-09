@@ -634,7 +634,7 @@ impl FlowsPanel {
         let records: Arc<Mutex<Vec<ActionHistoryRecord>>> = Arc::new(Mutex::new(Vec::new()));
         let records_for_sink = records.clone();
         let status = StatusSink::new(move |action_id, status, detail| {
-            if matches!(status, RunStatus::Running) {
+            if matches!(status, RunStatus::Running | RunStatus::Ready) {
                 return;
             }
             let (name, type_id) = action_meta
@@ -645,7 +645,7 @@ impl FlowsPanel {
                 RunStatus::Succeeded => RunOutcome::Succeeded,
                 RunStatus::Failed => RunOutcome::Failed,
                 RunStatus::Skipped => RunOutcome::Skipped,
-                RunStatus::Running => return,
+                RunStatus::Running | RunStatus::Ready => return,
             };
             records_for_sink.lock().unwrap().push(ActionHistoryRecord {
                 id: action_id.to_string(),

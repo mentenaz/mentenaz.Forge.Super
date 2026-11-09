@@ -19,6 +19,7 @@ pub mod layout;
 pub mod process_tracker;
 pub mod project_scan;
 pub mod registry;
+pub mod run_control;
 pub mod runner;
 pub mod scheduler;
 pub mod schema;
@@ -34,7 +35,8 @@ pub use layout::WorkflowLayout;
 pub use process_tracker::{ProcessInfo, ProcessStatus};
 pub use project_scan::{DetectedService, ServiceKind, scan as scan_project};
 pub use registry::{ActionCategory, ActionDef, CatalogGroup, FieldKind, InputField, OutputField};
-pub use runner::run_workflow;
+pub use run_control::{RunControl, STOPPED_MESSAGE};
+pub use runner::{RunEnd, run_workflow, run_workflow_controlled};
 pub use scheduler::{LevelResult, compute_levels, validate};
 pub use schema::{
     Action, ActionMap, Branch, JsonLogicExpr, Limit, RunOutcome, ScriptRuntime, ScriptSource,

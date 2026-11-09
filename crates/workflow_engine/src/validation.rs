@@ -125,6 +125,7 @@ fn validate_map(actions: &ActionMap, path_prefix: &str, issues: &mut Vec<Validat
             ));
         }
         validate_action(&node_path, action, issues);
+        warn_about_unready_server(&node_path, action, issues);
 
         // Recurse into container bodies with appropriate path prefixes —
         // same convention as `workflow_json::build_actions_map`.
@@ -151,6 +152,53 @@ fn validate_map(actions: &ActionMap, path_prefix: &str, issues: &mut Vec<Validat
         if let Some(branch) = &action.catch {
             validate_map(&branch.actions, &format!("{node_path}/catch/"), issues);
         }
+    }
+}
+
+/// Words that mark a command as one that keeps running: a dev server, a watcher.
+const LONG_RUNNING_WORDS: &[&str] = &["dev", "serve", "start", "watch", "runserver", "preview"];
+
+/// A `StartProcess` that looks like a server but has no `ready_*` setting
+/// never becomes ready, so the nodes after it would wait for it to exit,
+/// which it will not do on its own. Not an error, since the command may end
+/// by itself after all.
+fn warn_about_unready_server(node_path: &str, action: &Action, issues: &mut Vec<ValidationIssue>) {
+    if action.type_id != "StartProcess" {
+        return;
+    }
+    let has_ready_setting =
+        ["ready_port", "ready_url", "ready_text"]
+            .iter()
+            .any(|key| match action.inputs.get(*key) {
+                None | Some(Value::Null) => false,
+                Some(Value::String(text)) => !text.trim().is_empty(),
+                Some(_) => true,
+            });
+    if has_ready_setting {
+        return;
+    }
+
+    let command = action.inputs.get("command").and_then(Value::as_str);
+    let args = action
+        .inputs
+        .get("args")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    let looks_long_running = command
+        .into_iter()
+        .chain(args)
+        .any(|word| LONG_RUNNING_WORDS.contains(&word) || word.starts_with("--watch"));
+    if looks_long_running {
+        issues.push(ValidationIssue::warning(
+            node_path,
+            None,
+            "This looks like a command that keeps running, such as a dev server, but it has \
+             no ready setting (ready_port, ready_url or ready_text). Without one the node \
+             is not done until the command exits, so the nodes after it would wait for that. \
+             Set one so they can start once the server is up.",
+        ));
     }
 }
 
@@ -833,6 +881,74 @@ mod tests {
                 && i.severity == ValidationSeverity::Warning),
             "empty inline code should be a warning: {issues:#?}"
         );
+    }
+
+    // ── A server with nothing to say when it is up ───────────────
+
+    fn start_process_node(command: &str, args: &[&str]) -> Action {
+        let mut a = Action::new("StartProcess");
+        a.inputs.insert("command".into(), Value::from(command));
+        a.inputs.insert("args".into(), serde_json::json!(args));
+        a
+    }
+
+    fn has_ready_warning(issues: &[ValidationIssue]) -> bool {
+        issues.iter().any(|i| {
+            i.severity == ValidationSeverity::Warning && i.message.contains("ready setting")
+        })
+    }
+
+    #[test]
+    fn a_dev_server_without_a_ready_setting_gets_a_warning() {
+        let def = def_with([("web", start_process_node("npm", &["run", "dev"]))]);
+        let issues = validate_definition(&def);
+        assert!(has_ready_warning(&issues), "{issues:#?}");
+        // It is a hint: it does not block the run.
+        assert!(
+            issues
+                .iter()
+                .all(|i| i.severity != ValidationSeverity::Error),
+            "{issues:#?}"
+        );
+    }
+
+    #[test]
+    fn a_dev_server_with_a_ready_setting_gets_no_warning() {
+        for (key, value) in [
+            ("ready_port", Value::from(5173)),
+            ("ready_url", Value::from("http://127.0.0.1:5173/")),
+            ("ready_text", Value::from("ready in")),
+        ] {
+            let mut node = start_process_node("npm", &["run", "dev"]);
+            node.inputs.insert(key.into(), value);
+            let issues = validate_definition(&def_with([("web", node)]));
+            assert!(!has_ready_warning(&issues), "{key}: {issues:#?}");
+        }
+    }
+
+    #[test]
+    fn a_blank_ready_setting_does_not_count() {
+        let mut node = start_process_node("npm", &["run", "dev"]);
+        node.inputs.insert("ready_text".into(), Value::from("   "));
+        let issues = validate_definition(&def_with([("web", node)]));
+        assert!(has_ready_warning(&issues), "{issues:#?}");
+    }
+
+    #[test]
+    fn a_build_command_gets_no_warning() {
+        let def = def_with([("build", start_process_node("npm", &["run", "build"]))]);
+        let issues = validate_definition(&def);
+        assert!(!has_ready_warning(&issues), "{issues:#?}");
+    }
+
+    #[test]
+    fn other_action_types_are_never_warned_about_a_ready_setting() {
+        let mut node = Action::new("log");
+        node.inputs.insert("level".into(), Value::from("info"));
+        node.inputs
+            .insert("message".into(), Value::from("npm run dev"));
+        let issues = validate_definition(&def_with([("note", node)]));
+        assert!(!has_ready_warning(&issues), "{issues:#?}");
     }
 
     // ── Nested containers ─────────────────────────────────────────────────

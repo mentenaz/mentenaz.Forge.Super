@@ -213,11 +213,21 @@ impl ProcessRegistry {
             .collect()
     }
 
+    /// Whether any line `id` has printed so far contains `needle`. Stderr lines
+    /// carry the `"! "` mark [`spawn_log_reader`] puts on them, which the match
+    /// ignores unless `needle` itself starts with it.
+    pub fn log_contains(&self, id: &str, needle: &str) -> bool {
+        let entries = self.entries.lock().unwrap();
+        entries
+            .get(id)
+            .is_some_and(|entry| entry.log.iter().any(|line| line.contains(needle)))
+    }
+
     /// `Some(code)` once `id` has exited, noting it in the process's status;
     /// `None` while it is still running or if `id` is unknown. A process
     /// that ended without an exit code (killed by a signal) counts as -1,
     /// the same as in [`Self::list`].
-    fn exit_code_if_exited(&self, id: &str) -> Option<i32> {
+    pub fn exit_code_if_exited(&self, id: &str) -> Option<i32> {
         let mut entries = self.entries.lock().unwrap();
         let entry = entries.get_mut(id)?;
         if entry.info.status == ProcessStatus::Running
@@ -248,35 +258,49 @@ impl ProcessRegistry {
         }
     }
 
+    /// The ids of the processes that match `keep` and are still running. A
+    /// process whose exit has not been noticed yet is checked first, so a
+    /// process that ended on its own is not counted.
+    fn running_ids(&self, keep: impl Fn(&Entry) -> bool) -> Vec<String> {
+        let mut entries = self.entries.lock().unwrap();
+        entries
+            .iter_mut()
+            .filter(|(_, entry)| keep(entry))
+            .filter_map(|(id, entry)| {
+                if entry.info.status == ProcessStatus::Running
+                    && let Ok(Some(exit_status)) = entry.child.try_wait()
+                {
+                    entry.info.status = ProcessStatus::Exited(exit_status.code().unwrap_or(-1));
+                }
+                (entry.info.status == ProcessStatus::Running).then(|| id.clone())
+            })
+            .collect()
+    }
+
     /// Stops every process of the same flow and node that an *earlier* run
     /// started and that is still running, and returns how many it stopped.
     /// Processes from this same run are left alone (a node in a loop starts
     /// several), and so are other flows' and other nodes'.
     pub fn stop_running_from_earlier_runs(&self, owner: &ProcessOwner, action_id: &str) -> usize {
         // `stop` takes the lock itself, so the ids are collected first.
-        let stale: Vec<String> = {
-            let mut entries = self.entries.lock().unwrap();
-            entries
-                .iter_mut()
-                .filter(|(_, entry)| {
-                    entry.info.action_id == action_id
-                        && entry
-                            .owner
-                            .as_ref()
-                            .is_some_and(|o| o.flow == owner.flow && o.run != owner.run)
-                })
-                .filter_map(|(id, entry)| {
-                    if entry.info.status == ProcessStatus::Running
-                        && let Ok(Some(exit_status)) = entry.child.try_wait()
-                    {
-                        entry.info.status = ProcessStatus::Exited(exit_status.code().unwrap_or(-1));
-                    }
-                    (entry.info.status == ProcessStatus::Running).then(|| id.clone())
-                })
-                .collect()
-        };
+        let stale = self.running_ids(|entry| {
+            entry.info.action_id == action_id
+                && entry
+                    .owner
+                    .as_ref()
+                    .is_some_and(|o| o.flow == owner.flow && o.run != owner.run)
+        });
         stale
             .iter()
+            .filter(|id| self.stop(id.as_str()).is_ok())
+            .count()
+    }
+
+    /// Stops every process this exact run started and that is still running,
+    /// and returns how many it stopped.
+    pub fn stop_run(&self, owner: &ProcessOwner) -> usize {
+        let ids = self.running_ids(|entry| entry.owner.as_ref() == Some(owner));
+        ids.iter()
             .filter(|id| self.stop(id.as_str()).is_ok())
             .count()
     }
@@ -719,6 +743,66 @@ mod tests {
         assert_eq!(status_of(&this_run), ProcessStatus::Running);
 
         for id in [&earlier_api, &other_flow, &this_run] {
+            registry.stop(id).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn log_contains_looks_through_what_the_process_printed() {
+        let registry = ProcessRegistry::default();
+        let id = registry.register(
+            "start1".to_string(),
+            "sleep".to_string(),
+            vec![],
+            None,
+            spawn_long_running(30),
+        );
+        assert!(!registry.log_contains(&id, "listening"));
+
+        registry.append_log(&id, "starting up".to_string());
+        registry.append_log(&id, "! warning: listening on 0.0.0.0".to_string());
+        assert!(registry.log_contains(&id, "listening"));
+        assert!(!registry.log_contains(&id, "crashed"));
+        assert!(!registry.log_contains("never-registered", "listening"));
+        registry.stop(&id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_run_stops_only_that_runs_processes() {
+        let registry = ProcessRegistry::default();
+        let start = |owner: ProcessOwner, action_id: &str| {
+            registry.register_owned(
+                Some(owner),
+                action_id.to_string(),
+                "sleep".to_string(),
+                vec![],
+                None,
+                spawn_long_running(30),
+            )
+        };
+        let status_of = |id: &str| {
+            registry
+                .list()
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.status)
+                .unwrap()
+        };
+
+        let web = start(owner("flow", "run-1"), "web");
+        let api = start(owner("flow", "run-1"), "api");
+        let later_run = start(owner("flow", "run-2"), "web");
+        let other_flow = start(owner("other", "run-1"), "web");
+
+        let stopped = registry.stop_run(&owner("flow", "run-1"));
+
+        assert_eq!(stopped, 2);
+        assert_ne!(status_of(&web), ProcessStatus::Running);
+        assert_ne!(status_of(&api), ProcessStatus::Running);
+        assert_eq!(status_of(&later_run), ProcessStatus::Running);
+        assert_eq!(status_of(&other_flow), ProcessStatus::Running);
+
+        for id in [&later_run, &other_flow] {
             registry.stop(id).unwrap();
         }
     }

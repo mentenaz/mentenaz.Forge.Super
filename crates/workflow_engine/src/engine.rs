@@ -15,6 +15,7 @@ use datalogic_rs::Engine;
 use serde_json::{Map, Value};
 
 use super::process_tracker::ProcessOwner;
+use super::run_control::RunControl;
 
 /// Reserved data-context key for a `Foreach` iteration's loop variable —
 /// see the design doc §1's "Locked" note. Not a valid action id (action ids
@@ -142,6 +143,9 @@ pub struct RunContext {
     /// Which flow and run this is, for the processes it starts. `None` when
     /// the context was not made by `run_workflow` (the executor tests).
     process_owner: Option<ProcessOwner>,
+    /// This run's stop flag and the servers it has started. Shared by every
+    /// context derived from this one.
+    control: RunControl,
 }
 
 impl RunContext {
@@ -153,6 +157,7 @@ impl RunContext {
             item: None,
             engine: Arc::new(Engine::new()),
             process_owner: None,
+            control: RunControl::new(),
         }
     }
 
@@ -166,6 +171,22 @@ impl RunContext {
     /// See [`Self::with_process_owner`].
     pub fn process_owner(&self) -> Option<&ProcessOwner> {
         self.process_owner.as_ref()
+    }
+
+    /// Makes `control` this run's stop flag and server list, so the caller
+    /// that holds a clone of it can stop the run.
+    pub fn with_control(mut self, control: RunControl) -> Self {
+        self.control = control;
+        self
+    }
+
+    pub fn control(&self) -> &RunControl {
+        &self.control
+    }
+
+    /// Whether the run was asked to stop.
+    pub fn is_stopped(&self) -> bool {
+        self.control.is_stopped()
     }
 
     /// A snapshot for one JSONLogic evaluation — a clone, not a live view,
@@ -311,6 +332,7 @@ impl RunContext {
             item: None,
             engine: self.engine.clone(),
             process_owner: self.process_owner.clone(),
+            control: self.control.clone(),
         }
     }
 

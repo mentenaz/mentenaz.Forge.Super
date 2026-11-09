@@ -73,42 +73,66 @@ Complete examples: `DOCS/workflow-schema/example-flow.json` and
 
 Containers hold their own nested `actions` map.
 
-#### Dev servers: `StartProcess` and `WaitForPort`
+#### Commands and servers: `StartProcess` and `WaitForPort`
 
-A flow that starts a dev server and waits for it uses the two together:
-`StartProcess`, then `WaitForPort` with `runAfter` on it.
+`StartProcess` runs a command and **follows its life**:
 
-| Action | Input | Notes |
-| --- | --- | --- |
-| `StartProcess` | `command`, `args`, `cwd` | `args` is a JSON array of strings |
-| | `url` | Shown in the Processes panel; informational |
-| | `startup_check_ms` | Default `1500`; `0` turns the check off |
-| `WaitForPort` | `port` | Polled on both `127.0.0.1` and `[::1]` |
-| | `timeout_ms` | Default `30000`, shared by everything below |
-| | `url` | Optional `http(s)` address that must also return 2xx or 3xx |
+- **A command that ends** (a build, a test run, a migration) finishes the node
+  when it exits: `Succeeded` on exit code 0, `Failed` on any other code, with
+  the last lines it printed in the error.
+- **A server** (`npm run dev`, `uvicorn ...`) never ends on its own, so the
+  `ready_*` settings say when it is up. The node is then **Ready**: the nodes
+  after it can start, and the server keeps running.
 
-- **Startup check.** `StartProcess` succeeds once the process has been running
-  for `startup_check_ms`. A process that exits with a non-zero code before then
-  fails the node, and the error holds the exit code and the last lines it
-  printed. A zero exit is a success, for launchers that start a service and
-  exit.
-- **Re-running a flow replaces its servers.** Before it starts, a
-  `StartProcess` stops any server that an earlier run of the same flow started
-  for the same node and that is still running. Nodes inside a loop do not stop
-  each other (same run), and other flows are never touched. A flow *ending*
-  stops nothing: leaving the servers running is what it is for.
-  Servers that were not started by this engine in this app session (from before
-  an upgrade, or from a previous launch of the app) are not tracked and have to
-  be stopped by hand.
-- **Readiness.** `WaitForPort` succeeds when `127.0.0.1` or `[::1]` accepts a
-  connection, so a server bound to only one of them is found. Its outputs are
-  `ready` and `address`, the one that answered. With `url`, it then keeps
-  polling that address until it returns 2xx or 3xx (a health endpoint is the
-  usual choice), which shows the app is serving and not only that something
-  owns the port. A redirect counts as an answer.
-- **Not covered.** `StartProcess` runs `command` with the IDE's runtimes first
-  on `PATH`, not the project's virtual environment, so a Python project's
-  `.venv` interpreter has to be given as an absolute path in `command`.
+| Input | Notes |
+| --- | --- |
+| `command`, `args`, `cwd` | `args` is a JSON array of strings |
+| `ready_port` | Ready once this port answers on `127.0.0.1` or `[::1]` |
+| `ready_url` | Ready once this `http(s)` address returns 2xx or 3xx |
+| `ready_text` | Ready once the command's output contains this text |
+| `ready_timeout_ms` | How long to wait for the ready settings. Default `60000` |
+| `url` | Shown for the server; informational |
+
+All the ready settings that are given must pass. If the command exits first,
+the node fails with its exit code and output. If they do not pass in time, the
+server is stopped and the node fails. With none of them, the node is done when
+the command exits, so a server with no ready setting holds back the nodes
+after it; the validator warns about a command that looks like one.
+
+**A run lasts as long as its servers.** When the last node has finished, the
+run keeps watching the servers it started. Each server's node reports how it
+ended (`Succeeded` on exit code 0, `Failed` otherwise), and the run ends when
+none is left. Three things end it sooner:
+
+- a server exits with an error: the run fails and the other servers are stopped;
+- a node fails: the servers the run started are stopped;
+- the run is stopped through its `RunControl` (`run_workflow_controlled`): every
+  server is stopped, nodes that have not started are skipped, and the run ends
+  as `Stopped`.
+
+`run_workflow` is the same without a handle, so it cannot be stopped.
+
+**Re-running a flow replaces its servers.** Before it starts, a `StartProcess`
+stops any server that an *earlier run of the same flow* started for the same
+node and that is still running. Nodes inside a loop do not stop each other
+(same run), and other flows are never touched. Servers that were not started
+by this engine in this app session are not tracked and have to be stopped by
+hand.
+
+**`WaitForPort`** is still there as its own node. It succeeds when `127.0.0.1`
+or `[::1]` accepts a connection (so a server bound to only one of them is
+found), outputs `ready` and `address`, and with `url` it then waits for that
+address to return 2xx or 3xx. A redirect counts as an answer.
+
+**Not covered yet.**
+
+- A finite `script` node that is already running when the run is stopped is not
+  interrupted; it finishes, and the run then ends.
+- A server that dies while later nodes are still running is noticed when those
+  nodes have finished.
+- `StartProcess` runs `command` with the IDE's runtimes first on `PATH`, not the
+  project's virtual environment, so a Python project's `.venv` interpreter has
+  to be given as an absolute path in `command`.
 
 #### Variables
 

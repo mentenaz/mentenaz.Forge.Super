@@ -20,6 +20,7 @@ use serde_json::{Map, Value};
 use super::engine::RunContext;
 use super::executors::execute_leaf;
 use super::registry;
+use super::run_control::Service;
 use super::scheduler::run_level;
 use super::schema::{Action, RunOutcome};
 use super::status::{IterationScope, RunStatus, StatusSink};
@@ -34,6 +35,19 @@ fn report_skipped(result: &super::scheduler::LevelResult, status: &StatusSink) {
             status.report(id, RunStatus::Skipped, None);
         }
     }
+}
+
+/// The process id of the server a `StartProcess` node left running, when its
+/// result says it is ready (`WaitForPort` also outputs `ready`, so the type is
+/// checked too).
+fn running_service(action: &Action, outputs: &Map<String, Value>) -> Option<String> {
+    if action.type_id != "StartProcess" || outputs.get("ready") != Some(&Value::Bool(true)) {
+        return None;
+    }
+    outputs
+        .get("processId")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// Dispatches one action to either a leaf executor (§4) or a container
@@ -66,10 +80,23 @@ pub fn execute_action<'a, 'r: 'a>(
             execute_leaf(action_id, action, ctx, solution_root).await
         };
         let (phase, detail) = match &outcome {
-            Ok(outputs) => (
-                RunStatus::Succeeded,
-                (!outputs.is_empty()).then(|| serde_json::to_string(outputs).unwrap_or_default()),
-            ),
+            Ok(outputs) => {
+                let detail = (!outputs.is_empty())
+                    .then(|| serde_json::to_string(outputs).unwrap_or_default());
+                // A server that has come up and is still running: the node is
+                // `Ready`, not finished. The run keeps watching it and reports
+                // how it ends.
+                if let Some(process_id) = running_service(action, outputs) {
+                    ctx.control().add_service(Service {
+                        action_id: action_id.to_string(),
+                        process_id,
+                        status: status.clone(),
+                    });
+                    (RunStatus::Ready, detail)
+                } else {
+                    (RunStatus::Succeeded, detail)
+                }
+            }
             Err(message) => (RunStatus::Failed, Some(message.clone())),
         };
         status.report(action_id, phase, detail);

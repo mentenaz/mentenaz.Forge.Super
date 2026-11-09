@@ -328,17 +328,19 @@ pub static REGISTRY: &[ActionDef] = &[
         category: ActionCategory::Leaf,
         catalog_group: CatalogGroup::Processes,
         runnable: true,
-        // Unlike every other leaf, this resolves `Succeeded` once the process
-        // has *started*, not when it exits — for a dev server
-        // (`npm run dev`, `uvicorn ...`) that never exits on its own. It
-        // still fails the node if the process exits with an error within
-        // `startup_check_ms`, and it stops the servers an earlier run of the
-        // same flow left running for this node (see `execute_start_process`).
+        // The node follows the command's life. A command that ends (a build)
+        // finishes the node when it exits: `Succeeded` on code 0, `Failed`
+        // otherwise. A server (`npm run dev`, `uvicorn ...`) never ends on
+        // its own, so the `ready_*` settings say when it is up: the node is
+        // then `Ready`, the nodes after it start, and the run keeps watching
+        // the server until it exits or the run is stopped. It also stops the
+        // servers an earlier run of the same flow left running for this node
+        // (see `execute_start_process`).
         // `args` is a JSON array of strings, not a single string (a shell
         // command line has quoting ambiguity this avoids entirely — see
-        // `execute_start_process`'s doc comment). Pair with `WaitForPort`
-        // (`runAfter` this action's own id) to confirm it actually came
-        // up. The spawned child is tracked in a dedicated in-process
+        // `execute_start_process`'s doc comment). The `ready_*` settings say
+        // when it is up (`WaitForPort` still works as a node of its own).
+        // The spawned child is tracked in a dedicated in-process
         // registry (`process_tracker`) so it can be listed/stopped from
         // the Designer's own "Processes" panel — deliberately *not* routed
         // through `ScriptRunner`, which is a different, single-concurrency
@@ -365,14 +367,32 @@ pub static REGISTRY: &[ActionDef] = &[
                 "Dev-server URL shown in the Processes panel, e.g. http://localhost:5173",
             ),
             opt_h(
-                "startup_check_ms",
+                "ready_port",
                 FieldKind::Number,
-                "Fail if the process exits with an error within this many ms of starting; default 1500, 0 turns the check off",
+                "Ready once this TCP port answers (127.0.0.1 or [::1]). Combine with the other ready settings: all must pass",
+            ),
+            opt_h(
+                "ready_url",
+                FieldKind::String,
+                "Ready once this http(s) address returns 2xx or 3xx, e.g. http://127.0.0.1:8000/api/health/",
+            ),
+            opt_h(
+                "ready_text",
+                FieldKind::String,
+                "Ready once the command's output contains this text, e.g. \"ready in\"",
+            ),
+            opt_h(
+                "ready_timeout_ms",
+                FieldKind::Number,
+                "How long to wait for the ready settings before failing the node; default 60 000",
             ),
         ],
         outputs: &[
             output("pid", FieldKind::Number),
             output("processId", FieldKind::String),
+            output("ready", FieldKind::Bool),
+            output("exit_code", FieldKind::Number),
+            output("address", FieldKind::String),
         ],
     },
     ActionDef {

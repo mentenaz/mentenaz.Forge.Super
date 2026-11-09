@@ -16,6 +16,10 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStatus {
     Running,
+    /// A server the node started is up, its ready settings have passed, and it
+    /// is still running, so the nodes after it can start. A later `Succeeded`
+    /// or `Failed` report says how it ended.
+    Ready,
     Succeeded,
     Failed,
     Skipped,
