@@ -217,7 +217,8 @@ impl ProcessRegistry {
     }
 
     /// The last `lines` lines `id` has printed, oldest-first, with the `"! "`
-    /// mark [`spawn_log_reader`] puts on stderr lines taken off.
+    /// mark [`spawn_log_reader`] puts on stderr lines taken off and colour
+    /// codes removed.
     pub fn log_tail(&self, id: &str, lines: usize) -> Vec<String> {
         let entries = self.entries.lock().unwrap();
         let Some(entry) = entries.get(id) else {
@@ -228,18 +229,21 @@ impl ProcessRegistry {
             .log
             .iter()
             .skip(skip)
-            .map(|line| line.strip_prefix("! ").unwrap_or(line).to_string())
+            .map(|line| crate::executors::strip_ansi(line.strip_prefix("! ").unwrap_or(line)))
             .collect()
     }
 
     /// Whether any line `id` has printed so far contains `needle`. Stderr lines
     /// carry the `"! "` mark [`spawn_log_reader`] puts on them, which the match
-    /// ignores unless `needle` itself starts with it.
+    /// ignores unless `needle` itself starts with it. Colour codes in a line
+    /// are ignored too, so a coloured "ready in" still matches.
     pub fn log_contains(&self, id: &str, needle: &str) -> bool {
         let entries = self.entries.lock().unwrap();
-        entries
-            .get(id)
-            .is_some_and(|entry| entry.log.iter().any(|line| line.contains(needle)))
+        entries.get(id).is_some_and(|entry| {
+            entry.log.iter().any(|line| {
+                line.contains(needle) || crate::executors::strip_ansi(line).contains(needle)
+            })
+        })
     }
 
     /// `Some(code)` once `id` has exited, noting it in the process's status;

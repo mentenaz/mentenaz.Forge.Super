@@ -970,6 +970,46 @@ fn waiting_for(settings: &ReadySettings, progress: &ReadyProgress) -> Vec<String
     waiting
 }
 
+/// `text` without terminal escape sequences: colours and cursor moves (`ESC [
+/// ... final`), operating-system commands such as a window title (`ESC ] ...`
+/// ended by BEL or `ESC \`), and other two-character escapes. A dev server
+/// colours its output when it thinks it is on a terminal, and the raw codes
+/// would show as `[32m` in a log row.
+pub(crate) fn strip_ansi(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            plain.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                // Parameters and intermediates, then one final byte `@`..=`~`.
+                for next in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(next) = chars.next() {
+                    if next == '\u{7}' {
+                        break;
+                    }
+                    if next == '\u{1b}' {
+                        chars.next_if_eq(&'\\');
+                        break;
+                    }
+                }
+            }
+            // A two-character escape, or an escape at the end of the text.
+            Some(_) | None => {}
+        }
+    }
+    plain
+}
+
 /// How long the output forwarder waits for a line before checking whether the
 /// process has ended.
 const OUTPUT_FORWARD_IDLE: Duration = Duration::from_millis(300);
@@ -988,11 +1028,17 @@ fn forward_output(
     sink: StatusSink,
     mut lines: broadcast::Receiver<String>,
 ) {
-    // The registry keeps stderr lines marked with `"! "`.
+    // The registry keeps stderr lines marked with `"! "`. The text handed on is
+    // plain: no colour codes, and lines with nothing in them are left out.
     fn pass_on(sink: &StatusSink, action_id: &str, line: &str) {
-        match line.strip_prefix("! ") {
-            Some(text) => sink.report_output(action_id, OutputStream::Stderr, text),
-            None => sink.report_output(action_id, OutputStream::Stdout, line),
+        let (stream, text) = match line.strip_prefix("! ") {
+            Some(text) => (OutputStream::Stderr, text),
+            None => (OutputStream::Stdout, line),
+        };
+        let text = strip_ansi(text);
+        let text = text.trim_end_matches(['\r', '\n']);
+        if !text.trim().is_empty() {
+            sink.report_output(action_id, stream, text);
         }
     }
 
@@ -1610,6 +1656,21 @@ mod tests {
         );
         let err = execute_wait_for_port(&action).await.unwrap_err();
         assert!(err.contains("not ready"));
+    }
+
+    #[test]
+    fn strip_ansi_removes_colours_titles_and_cursor_moves() {
+        assert_eq!(
+            strip_ansi("\u{1b}[32m\u{1b}[1mVITE\u{1b}[22m v8.3.6\u{1b}[39m  ready in 522 ms"),
+            "VITE v8.3.6  ready in 522 ms"
+        );
+        assert_eq!(strip_ansi("\u{1b}]0;npm run dev\u{7}started"), "started");
+        assert_eq!(strip_ansi("\u{1b}]0;title\u{1b}\\started"), "started");
+        assert_eq!(strip_ansi("\u{1b}[2K\u{1b}[1Gloading"), "loading");
+        assert_eq!(strip_ansi("plain ünïcode text"), "plain ünïcode text");
+        // An escape cut off at the end of the line does not panic or leak.
+        assert_eq!(strip_ansi("done\u{1b}[3"), "done");
+        assert_eq!(strip_ansi("done\u{1b}"), "done");
     }
 
     /// A local HTTP server that answers every request, with the next status
