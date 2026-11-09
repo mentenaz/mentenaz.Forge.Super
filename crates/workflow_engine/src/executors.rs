@@ -8,8 +8,10 @@
 //! `backend::on_tokio`, same bridge `github/cli.rs` already uses — GPUI has
 //! no ambient tokio reactor.
 
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 
 use serde_json::{Map, Value};
 use tokio::io::AsyncWriteExt;
@@ -29,7 +31,8 @@ use super::schema::{Action, ScriptRuntime, ScriptSource};
 /// resolution is always relative to the solution root, never the running
 /// process's own cwd — a direct lesson from ForgeFlow's `uri_to_path` bug).
 /// `action_id` is only consulted by `StartProcess`, to tag the tracked
-/// process with which action started it.
+/// process with which action started it (and, with the run's process owner,
+/// to find what an earlier run of the flow left behind).
 pub async fn execute_leaf(
     action_id: &str,
     action: &Action,
@@ -45,7 +48,9 @@ pub async fn execute_leaf(
         "log" => execute_log(action, ctx).await,
         "WaitForPort" => execute_wait_for_port(action).await,
         "SetEnv" => execute_set_env(action),
-        "StartProcess" => execute_start_process(action_id, action, solution_root).await,
+        "StartProcess" => {
+            execute_start_process(action_id, ctx.process_owner(), action, solution_root).await
+        }
         "InitVariable" => execute_init_variable(action, ctx),
         "SetVariable" => execute_set_variable(action, ctx),
         // FUTURE FEATURE — `sendEmail`, `DbMigration` and `AiCheck` are
@@ -705,9 +710,54 @@ async fn execute_log(action: &Action, ctx: &RunContext) -> Result<Map<String, Va
 //     Ok(Map::new())
 // }
 
-/// Direct port of the old `chain.rs`'s `execute_wait_for_port_step` — polls
-/// a local TCP connect on an interval until it succeeds or `timeout_ms`
-/// (default 30s) elapses.
+/// How long one connection attempt may take before the next poll.
+const PORT_CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Tries `127.0.0.1` and `[::1]` at once. A server bound to only one of them
+/// is up all the same: Vite, for one, can listen on `[::1]` alone, and Django
+/// on `127.0.0.1` alone. Returns the address that answered, or what each said.
+async fn connect_to_loopback(port: u16) -> Result<&'static str, String> {
+    async fn attempt(addr: SocketAddr) -> Result<(), String> {
+        match tokio::time::timeout(PORT_CONNECT_TIMEOUT, tokio::net::TcpStream::connect(addr)).await
+        {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(format!("{addr}: {e}")),
+            Err(_) => Err(format!("{addr}: no answer within {PORT_CONNECT_TIMEOUT:?}")),
+        }
+    }
+    let (v4, v6) = futures::future::join(
+        attempt(SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
+        attempt(SocketAddr::from((Ipv6Addr::LOCALHOST, port))),
+    )
+    .await;
+    match (v4, v6) {
+        (Ok(()), _) => Ok("127.0.0.1"),
+        (_, Ok(())) => Ok("[::1]"),
+        (Err(v4), Err(v6)) => Err(format!("{v4}; {v6}")),
+    }
+}
+
+/// Whether `url` answers with a 2xx or 3xx status. `Err` says what it did
+/// instead, for the timeout message.
+async fn url_answers(client: &reqwest::Client, url: &str) -> Result<(), String> {
+    match client.get(url).send().await {
+        Ok(response) if response.status().is_success() || response.status().is_redirection() => {
+            Ok(())
+        }
+        Ok(response) => Err(format!("HTTP {}", response.status().as_u16())),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Polls until a server answers on `port`, up to `timeout_ms` (default 30s).
+///
+/// "Answers" means a TCP connect to `127.0.0.1` or `[::1]` succeeds. With the
+/// optional `url` input it also means that address returns 2xx or 3xx, which
+/// shows the app is serving and not only that something owns the port (a
+/// health endpoint is the usual choice). Both stages share the one timeout.
+///
+/// Outputs `ready` and `address`, the loopback address that answered, so a
+/// flow author can see which one the server listens on.
 async fn execute_wait_for_port(action: &Action) -> Result<Map<String, Value>, String> {
     let port = require_f64(action, "port")? as u16;
     let timeout_ms = action
@@ -715,32 +765,94 @@ async fn execute_wait_for_port(action: &Action) -> Result<Map<String, Value>, St
         .get("timeout_ms")
         .and_then(Value::as_u64)
         .unwrap_or(30_000);
+    let url = action
+        .inputs
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string);
+    if let Some(url) = &url
+        && !(url.starts_with("http://") || url.starts_with("https://"))
+    {
+        return Err(format!(
+            "WaitForPort: \"url\" must start with http:// or https://, not \"{url}\""
+        ));
+    }
 
     on_tokio(async move {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-        loop {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_ok()
-            {
-                let mut outputs = Map::new();
-                outputs.insert("ready".to_string(), Value::Bool(true));
-                return Ok(outputs);
-            }
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+
+        let address = loop {
+            let connect_error = match connect_to_loopback(port).await {
+                Ok(address) => break address,
+                Err(error) => error,
+            };
             if tokio::time::Instant::now() >= deadline {
                 return Err(format!(
-                    "WaitForPort: port {port} not ready after {timeout_ms}ms"
+                    "WaitForPort: port {port} not ready after {timeout_ms}ms ({connect_error})"
                 ));
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+
+        if let Some(url) = url {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                // A redirect is itself an answer; following it could end up
+                // somewhere that is not up yet.
+                .redirect_policy(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| format!("WaitForPort: failed to build client: {e}"))?;
+            loop {
+                let last_url_error = match url_answers(&client, &url).await {
+                    Ok(()) => break,
+                    Err(error) => error,
+                };
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "WaitForPort: port {port} is open, but {url} did not return 2xx or 3xx within {timeout_ms}ms (last: {last_url_error})"
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
+
+        let mut outputs = Map::new();
+        outputs.insert("ready".to_string(), Value::Bool(true));
+        outputs.insert("address".to_string(), Value::String(address.to_string()));
+        Ok(outputs)
     })
     .await
 }
 
+/// How long `StartProcess` watches a new process for an early failure unless
+/// the node says otherwise (`startup_check_ms`).
+const DEFAULT_STARTUP_CHECK_MS: u64 = 1500;
+
+/// How many of a failed process's last output lines go into the error.
+const STARTUP_FAILURE_LOG_LINES: usize = 20;
+
+/// Time for the output readers to hand over what a process printed on its way
+/// out, once it has exited: the pipes close with the process, but the readers
+/// are separate tasks.
+const OUTPUT_DRAIN: Duration = Duration::from_millis(200);
+
 /// Starts a long-running/detached process (a dev server, typically) and
-/// resolves `Succeeded` the moment it *starts* — not when it exits, unlike
-/// every other executor in this file. `args` is a JSON array of strings
+/// resolves `Succeeded` once it has *started* — not when it exits, unlike
+/// every other executor in this file. "Started" means it is still running
+/// after `startup_check_ms` (default 1.5s, `0` to skip the check): a process
+/// that exits with a non-zero code inside that window fails the node with
+/// that code and the last lines it printed, so a missing module shows up as
+/// itself and not as a `WaitForPort` timeout half a minute later. A zero exit
+/// is still a success, for launchers that start a service and exit.
+///
+/// Servers an *earlier run of the same flow* left running for this same node
+/// are stopped first, so re-running a flow replaces its servers and does not
+/// pile up beside them. Nothing is stopped when the flow ends: a flow that
+/// starts a dev server is meant to leave it running.
+///
+/// `args` is a JSON array of strings
 /// (`["run", "dev"]`), not one shell command-line string — keeps the schema
 /// itself free of quoting ambiguity, even though the string that's actually
 /// exec'd underneath does get shell-quoted on Windows (see below). `cwd`,
@@ -770,6 +882,7 @@ async fn execute_wait_for_port(action: &Action) -> Result<Map<String, Value>, St
 /// descendant instead of stopping it).
 async fn execute_start_process(
     action_id: &str,
+    owner: Option<&process_tracker::ProcessOwner>,
     action: &Action,
     solution_root: &Path,
 ) -> Result<Map<String, Value>, String> {
@@ -803,13 +916,37 @@ async fn execute_start_process(
         .get("url")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let startup_check_ms = action
+        .inputs
+        .get("startup_check_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_STARTUP_CHECK_MS);
     let action_id = action_id.to_string();
+    let owner = owner.cloned();
 
     on_tokio(async move {
+        if let Some(owner) = &owner {
+            let stopped = process_tracker::registry().stop_running_from_earlier_runs(owner, &action_id);
+            if stopped > 0 {
+                log::info!(
+                    "[workflow StartProcess] stopped {stopped} process(es) that an earlier run of \"{action_id}\" left running"
+                );
+            }
+        }
+
         #[cfg(target_os = "windows")]
         let mut cmd = {
+            use std::os::windows::process::CommandExt as _;
             let mut c = TokioCommand::new("cmd.exe");
-            c.args(["/C", &windows_command_line(&command, &args)]);
+            // Raw, not `args`: `args` wraps an argument that has a space in
+            // quotes and escapes the quotes inside it as `\"`, which cmd.exe
+            // does not understand, so a path with a space reached the shell
+            // mangled. `/S` makes cmd strip exactly the outer pair of quotes
+            // added here and take the rest of the line as it is.
+            c.as_std_mut()
+                .raw_arg("/S")
+                .raw_arg("/C")
+                .raw_arg(format!("\"{}\"", windows_command_line(&command, &args)));
             c
         };
         #[cfg(not(target_os = "windows"))]
@@ -846,12 +983,33 @@ async fn execute_start_process(
         // anything about reading pipes.
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let process_id = process_tracker::registry().register(action_id, command, args, url, child);
+        let command_line = std::iter::once(command.as_str())
+            .chain(args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let registry = process_tracker::registry();
+        let process_id = registry.register_owned(owner, action_id, command, args, url, child);
         if let Some(stdout) = stdout {
             process_tracker::spawn_log_reader(process_id.clone(), stdout, false);
         }
         if let Some(stderr) = stderr {
             process_tracker::spawn_log_reader(process_id.clone(), stderr, true);
+        }
+
+        if startup_check_ms > 0
+            && let Some(code) = registry
+                .wait_for_early_exit(&process_id, Duration::from_millis(startup_check_ms))
+                .await
+            && code != 0
+        {
+            tokio::time::sleep(OUTPUT_DRAIN).await;
+            let output = registry.log_tail(&process_id, STARTUP_FAILURE_LOG_LINES);
+            return Err(startup_failure_message(
+                &command_line,
+                code,
+                startup_check_ms,
+                &output,
+            ));
         }
 
         let mut outputs = Map::new();
@@ -863,6 +1021,31 @@ async fn execute_start_process(
         Ok(outputs)
     })
     .await
+}
+
+/// The error for a process that exited with `code` soon after starting:
+/// what it was, and what it printed on the way out.
+fn startup_failure_message(
+    command_line: &str,
+    code: i32,
+    window_ms: u64,
+    output: &[String],
+) -> String {
+    let mut message = format!(
+        "StartProcess: \"{command_line}\" exited with code {code} within {window_ms}ms of starting"
+    );
+    let output = output
+        .iter()
+        .map(|line| line.trim_end())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if output.is_empty() {
+        message.push_str(" (it printed nothing; see the Processes panel)");
+    } else {
+        message.push_str(":\n");
+        message.push_str(&output.join("\n"));
+    }
+    message
 }
 
 /// Builds the `cmd.exe /C` command line for [`execute_start_process`] —
@@ -1104,6 +1287,7 @@ mod tests {
         );
         let outputs = execute_wait_for_port(&action).await.unwrap();
         assert_eq!(outputs.get("ready"), Some(&Value::Bool(true)));
+        assert_eq!(outputs.get("address"), Some(&Value::from("127.0.0.1")));
     }
 
     #[tokio::test]
@@ -1125,21 +1309,142 @@ mod tests {
         assert!(err.contains("not ready"));
     }
 
+    /// A local HTTP server that answers every request, with the next status
+    /// from `statuses` each time and the last one for every request after
+    /// that. Returns its `http://127.0.0.1:<port>/` address.
+    async fn mock_status_server(statuses: &'static [u16]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut served = 0;
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let status = statuses[served.min(statuses.len() - 1)];
+                served += 1;
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 {status} Status\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://127.0.0.1:{port}/")
+    }
+
+    #[tokio::test]
+    async fn wait_for_port_sees_a_server_that_listens_on_ipv6_only() {
+        // Vite can bind `[::1]` alone; a machine without IPv6 cannot run this.
+        let Ok(listener) = TcpListener::bind("[::1]:0").await else {
+            return;
+        };
+        let port = listener.local_addr().unwrap().port();
+        let _keep_alive = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+
+        let action = action_with_inputs(
+            "WaitForPort",
+            vec![
+                ("port", Value::from(port)),
+                ("timeout_ms", Value::from(2000)),
+            ],
+        );
+        let outputs = execute_wait_for_port(&action).await.unwrap();
+        assert_eq!(outputs.get("ready"), Some(&Value::Bool(true)));
+        assert_eq!(outputs.get("address"), Some(&Value::from("[::1]")));
+    }
+
+    #[tokio::test]
+    async fn wait_for_port_timeout_says_which_addresses_it_tried() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let action = action_with_inputs(
+            "WaitForPort",
+            vec![
+                ("port", Value::from(port)),
+                ("timeout_ms", Value::from(150)),
+            ],
+        );
+        let err = execute_wait_for_port(&action).await.unwrap_err();
+        assert!(err.contains(&format!("127.0.0.1:{port}")), "{err}");
+        assert!(err.contains(&format!("[::1]:{port}")), "{err}");
+    }
+
+    fn wait_with_url(url: &str, timeout_ms: u64) -> Action {
+        let port: u16 = url
+            .trim_start_matches("http://127.0.0.1:")
+            .trim_end_matches('/')
+            .parse()
+            .unwrap();
+        action_with_inputs(
+            "WaitForPort",
+            vec![
+                ("port", Value::from(port)),
+                ("url", Value::from(url)),
+                ("timeout_ms", Value::from(timeout_ms)),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn wait_for_port_with_a_url_keeps_waiting_until_it_answers_well() {
+        let url = mock_status_server(&[500, 503, 200]).await;
+        let outputs = execute_wait_for_port(&wait_with_url(&url, 5000))
+            .await
+            .unwrap();
+        assert_eq!(outputs.get("ready"), Some(&Value::Bool(true)));
+    }
+
+    #[tokio::test]
+    async fn wait_for_port_with_a_url_times_out_when_it_keeps_failing() {
+        let url = mock_status_server(&[500]).await;
+        let err = execute_wait_for_port(&wait_with_url(&url, 400))
+            .await
+            .unwrap_err();
+        assert!(err.contains("is open, but"), "{err}");
+        assert!(err.contains("HTTP 500"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn wait_for_port_with_a_url_counts_a_redirect_as_an_answer() {
+        let url = mock_status_server(&[302]).await;
+        execute_wait_for_port(&wait_with_url(&url, 2000))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_for_port_rejects_a_url_that_is_not_http() {
+        let action = action_with_inputs(
+            "WaitForPort",
+            vec![
+                ("port", Value::from(8000)),
+                ("url", Value::from("ftp://127.0.0.1/")),
+            ],
+        );
+        let err = execute_wait_for_port(&action).await.unwrap_err();
+        assert!(err.contains("http://"), "{err}");
+    }
+
     #[tokio::test]
     async fn start_process_registers_a_running_process_and_returns_a_pid() {
-        #[cfg(target_os = "windows")]
-        let (command, args) = ("cmd", vec!["/C".to_string(), "timeout /T 5".to_string()]);
-        #[cfg(not(target_os = "windows"))]
-        let (command, args) = ("sleep", vec!["5".to_string()]);
+        let (command, args) = long_running_command(5);
 
         let action = action_with_inputs(
             "StartProcess",
             vec![
                 ("command", Value::from(command)),
                 ("args", serde_json::json!(args)),
+                ("startup_check_ms", Value::from(200)),
             ],
         );
-        let outputs = execute_start_process("myStart", &action, std::path::Path::new("."))
+        let outputs = execute_start_process("myStart", None, &action, std::path::Path::new("."))
             .await
             .unwrap();
         assert!(outputs.get("pid").is_some());
@@ -1158,6 +1463,141 @@ mod tests {
         process_tracker::registry().stop(&process_id).unwrap();
     }
 
+    /// A command that keeps running for `seconds`, in the shape `StartProcess`
+    /// takes. (Not `timeout /T`: it quits at once when its input is not a
+    /// console, which `StartProcess` never gives it.)
+    fn long_running_command(seconds: u64) -> (&'static str, Vec<String>) {
+        #[cfg(target_os = "windows")]
+        return (
+            "cmd",
+            vec![
+                "/C".to_string(),
+                format!("ping -n {} 127.0.0.1 > nul", seconds + 1),
+            ],
+        );
+        #[cfg(not(target_os = "windows"))]
+        return ("sleep", vec![seconds.to_string()]);
+    }
+
+    /// A command that prints `boom` on stderr and exits with `code`.
+    fn failing_command(code: i32) -> (&'static str, Vec<String>) {
+        #[cfg(target_os = "windows")]
+        return (
+            "cmd",
+            vec!["/C".to_string(), format!("echo boom 1>&2 & exit {code}")],
+        );
+        #[cfg(not(target_os = "windows"))]
+        return (
+            "sh",
+            vec!["-c".to_string(), format!("echo boom >&2; exit {code}")],
+        );
+    }
+
+    fn start_action(command: &str, args: Vec<String>, extra: Vec<(&str, Value)>) -> Action {
+        let mut inputs = vec![
+            ("command", Value::from(command)),
+            ("args", serde_json::json!(args)),
+        ];
+        inputs.extend(extra);
+        action_with_inputs("StartProcess", inputs)
+    }
+
+    fn owner(flow: &str, run: &str) -> process_tracker::ProcessOwner {
+        process_tracker::ProcessOwner {
+            flow: flow.to_string(),
+            run: run.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_process_fails_with_the_output_when_it_exits_with_an_error_at_startup() {
+        let (command, args) = failing_command(3);
+        let action = start_action(command, args, vec![]);
+        let err = execute_start_process("s1", None, &action, std::path::Path::new("."))
+            .await
+            .unwrap_err();
+        assert!(err.contains("exited with code 3"), "{err}");
+        assert!(err.contains("boom"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn start_process_accepts_a_clean_exit_at_startup() {
+        // A launcher that starts something and exits is not a failure.
+        #[cfg(target_os = "windows")]
+        let (command, args) = ("cmd", vec!["/C".to_string(), "exit 0".to_string()]);
+        #[cfg(not(target_os = "windows"))]
+        let (command, args) = ("true", Vec::new());
+        let action = start_action(command, args, vec![]);
+        execute_start_process("s1", None, &action, std::path::Path::new("."))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn start_process_startup_check_can_be_turned_off() {
+        let (command, args) = failing_command(3);
+        let action = start_action(command, args, vec![("startup_check_ms", Value::from(0))]);
+        let outputs = execute_start_process("s1", None, &action, std::path::Path::new("."))
+            .await
+            .unwrap();
+        assert!(outputs.get("processId").is_some());
+    }
+
+    #[tokio::test]
+    async fn start_process_replaces_what_an_earlier_run_left_running() {
+        let (command, args) = long_running_command(30);
+        let action = start_action(command, args, vec![("startup_check_ms", Value::from(100))]);
+        let root = std::path::Path::new(".");
+        let registry = process_tracker::registry();
+        let status_of = |id: &str| {
+            registry
+                .list()
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.status)
+                .unwrap()
+        };
+        let start = |owner: process_tracker::ProcessOwner| {
+            let action = action.clone();
+            async move {
+                let outputs = execute_start_process("web", Some(&owner), &action, root)
+                    .await
+                    .unwrap();
+                outputs["processId"].as_str().unwrap().to_string()
+            }
+        };
+
+        let first = owner("project|flow-replace", "run-1");
+        let before = start(first.clone()).await;
+        assert_eq!(status_of(&before), process_tracker::ProcessStatus::Running);
+
+        // The same run starting the same node again (a loop) keeps it.
+        let same_run = start(first).await;
+        assert_eq!(status_of(&before), process_tracker::ProcessStatus::Running);
+
+        // Another flow's node with the same id is not touched either.
+        let other_flow = start(owner("project|other", "run-9")).await;
+        assert_eq!(status_of(&before), process_tracker::ProcessStatus::Running);
+
+        // The next run of the flow replaces what the first run started.
+        let after = start(owner("project|flow-replace", "run-2")).await;
+        // Stopped, or already seen as exited once the kill has been noticed.
+        assert_ne!(status_of(&before), process_tracker::ProcessStatus::Running);
+        assert_ne!(
+            status_of(&same_run),
+            process_tracker::ProcessStatus::Running
+        );
+        assert_eq!(status_of(&after), process_tracker::ProcessStatus::Running);
+        assert_eq!(
+            status_of(&other_flow),
+            process_tracker::ProcessStatus::Running
+        );
+
+        for id in [&after, &other_flow] {
+            registry.stop(id).unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn start_process_rejects_non_array_args() {
         let action = action_with_inputs(
@@ -1167,7 +1607,7 @@ mod tests {
                 ("args", Value::from("not an array")),
             ],
         );
-        let err = execute_start_process("s1", &action, std::path::Path::new("."))
+        let err = execute_start_process("s1", None, &action, std::path::Path::new("."))
             .await
             .unwrap_err();
         assert!(err.contains("array"));
@@ -1191,7 +1631,7 @@ mod tests {
                 ("cwd", Value::from("this/dir/does/not/exist")),
             ],
         );
-        let err = execute_start_process("s1", &action, std::path::Path::new("."))
+        let err = execute_start_process("s1", None, &action, std::path::Path::new("."))
             .await
             .unwrap_err();
         assert!(err.contains("failed to start"));

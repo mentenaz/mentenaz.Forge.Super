@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use super::container::execute_action;
 use super::engine::RunContext;
+use super::process_tracker::ProcessOwner;
 use super::scheduler::{run_level, validate};
 use super::schema::WorkflowDefinition;
 use super::status::{RunStatus, StatusSink};
@@ -23,7 +24,12 @@ pub async fn run_workflow(
     status: StatusSink,
 ) -> Result<(), String> {
     validate(&def)?;
-    let ctx = RunContext::new();
+    // A server this run starts replaces the one the flow's previous run left
+    // running for the same node, rather than piling up beside it.
+    let ctx = RunContext::new().with_process_owner(ProcessOwner {
+        flow: format!("{}|{}", solution_root.display(), def.id),
+        run: uuid::Uuid::new_v4().to_string(),
+    });
     let result = run_level(&def.actions, &ctx, |id, action, ctx| {
         execute_action(id, action, ctx, &solution_root, &status)
     })

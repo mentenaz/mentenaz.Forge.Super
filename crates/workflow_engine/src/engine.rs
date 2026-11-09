@@ -14,6 +14,8 @@ use std::sync::{Arc, RwLock};
 use datalogic_rs::Engine;
 use serde_json::{Map, Value};
 
+use super::process_tracker::ProcessOwner;
+
 /// Reserved data-context key for a `Foreach` iteration's loop variable —
 /// see the design doc §1's "Locked" note. Not a valid action id (action ids
 /// must start with a letter per the schema's `actionId` pattern), so this
@@ -137,6 +139,9 @@ pub struct RunContext {
     /// on `RunContext` (cheap to `Clone`) sidesteps that entirely.
     item: Option<Value>,
     engine: Arc<Engine>,
+    /// Which flow and run this is, for the processes it starts. `None` when
+    /// the context was not made by `run_workflow` (the executor tests).
+    process_owner: Option<ProcessOwner>,
 }
 
 impl RunContext {
@@ -147,7 +152,20 @@ impl RunContext {
             data: Arc::new(RwLock::new(Map::new())),
             item: None,
             engine: Arc::new(Engine::new()),
+            process_owner: None,
         }
+    }
+
+    /// Marks the processes started under this context as belonging to
+    /// `owner`, and so as replaceable by a later run of the same flow.
+    pub fn with_process_owner(mut self, owner: ProcessOwner) -> Self {
+        self.process_owner = Some(owner);
+        self
+    }
+
+    /// See [`Self::with_process_owner`].
+    pub fn process_owner(&self) -> Option<&ProcessOwner> {
+        self.process_owner.as_ref()
     }
 
     /// A snapshot for one JSONLogic evaluation — a clone, not a live view,
@@ -292,6 +310,7 @@ impl RunContext {
             data: Arc::new(RwLock::new(snapshot)),
             item: None,
             engine: self.engine.clone(),
+            process_owner: self.process_owner.clone(),
         }
     }
 

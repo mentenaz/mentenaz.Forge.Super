@@ -73,6 +73,43 @@ Complete examples: `DOCS/workflow-schema/example-flow.json` and
 
 Containers hold their own nested `actions` map.
 
+#### Dev servers: `StartProcess` and `WaitForPort`
+
+A flow that starts a dev server and waits for it uses the two together:
+`StartProcess`, then `WaitForPort` with `runAfter` on it.
+
+| Action | Input | Notes |
+| --- | --- | --- |
+| `StartProcess` | `command`, `args`, `cwd` | `args` is a JSON array of strings |
+| | `url` | Shown in the Processes panel; informational |
+| | `startup_check_ms` | Default `1500`; `0` turns the check off |
+| `WaitForPort` | `port` | Polled on both `127.0.0.1` and `[::1]` |
+| | `timeout_ms` | Default `30000`, shared by everything below |
+| | `url` | Optional `http(s)` address that must also return 2xx or 3xx |
+
+- **Startup check.** `StartProcess` succeeds once the process has been running
+  for `startup_check_ms`. A process that exits with a non-zero code before then
+  fails the node, and the error holds the exit code and the last lines it
+  printed. A zero exit is a success, for launchers that start a service and
+  exit.
+- **Re-running a flow replaces its servers.** Before it starts, a
+  `StartProcess` stops any server that an earlier run of the same flow started
+  for the same node and that is still running. Nodes inside a loop do not stop
+  each other (same run), and other flows are never touched. A flow *ending*
+  stops nothing: leaving the servers running is what it is for.
+  Servers that were not started by this engine in this app session (from before
+  an upgrade, or from a previous launch of the app) are not tracked and have to
+  be stopped by hand.
+- **Readiness.** `WaitForPort` succeeds when `127.0.0.1` or `[::1]` accepts a
+  connection, so a server bound to only one of them is found. Its outputs are
+  `ready` and `address`, the one that answered. With `url`, it then keeps
+  polling that address until it returns 2xx or 3xx (a health endpoint is the
+  usual choice), which shows the app is serving and not only that something
+  owns the port. A redirect counts as an answer.
+- **Not covered.** `StartProcess` runs `command` with the IDE's runtimes first
+  on `PATH`, not the project's virtual environment, so a Python project's
+  `.venv` interpreter has to be given as an absolute path in `command`.
+
 #### Variables
 
 `InitVariable` creates a variable and `SetVariable` changes it. A variable

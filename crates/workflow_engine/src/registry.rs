@@ -328,9 +328,12 @@ pub static REGISTRY: &[ActionDef] = &[
         category: ActionCategory::Leaf,
         catalog_group: CatalogGroup::Processes,
         runnable: true,
-        // Unlike every other leaf, this resolves `Succeeded` the moment
-        // the process *starts*, not when it exits — for a dev server
-        // (`npm run dev`, `uvicorn ...`) that never exits on its own.
+        // Unlike every other leaf, this resolves `Succeeded` once the process
+        // has *started*, not when it exits — for a dev server
+        // (`npm run dev`, `uvicorn ...`) that never exits on its own. It
+        // still fails the node if the process exits with an error within
+        // `startup_check_ms`, and it stops the servers an earlier run of the
+        // same flow left running for this node (see `execute_start_process`).
         // `args` is a JSON array of strings, not a single string (a shell
         // command line has quoting ambiguity this avoids entirely — see
         // `execute_start_process`'s doc comment). Pair with `WaitForPort`
@@ -361,6 +364,11 @@ pub static REGISTRY: &[ActionDef] = &[
                 FieldKind::String,
                 "Dev-server URL shown in the Processes panel, e.g. http://localhost:5173",
             ),
+            opt_h(
+                "startup_check_ms",
+                FieldKind::Number,
+                "Fail if the process exits with an error within this many ms of starting; default 1500, 0 turns the check off",
+            ),
         ],
         outputs: &[
             output("pid", FieldKind::Number),
@@ -374,14 +382,26 @@ pub static REGISTRY: &[ActionDef] = &[
         catalog_group: CatalogGroup::Processes,
         runnable: true,
         inputs: &[
-            req_h("port", FieldKind::Number, "TCP port number to poll"),
+            req_h(
+                "port",
+                FieldKind::Number,
+                "TCP port to poll, on both 127.0.0.1 and [::1]",
+            ),
             opt_h(
                 "timeout_ms",
                 FieldKind::Number,
                 "Max wait in milliseconds; default 30 000",
             ),
+            opt_h(
+                "url",
+                FieldKind::String,
+                "Also wait for this http(s) address to return 2xx or 3xx, e.g. http://127.0.0.1:8000/api/health/",
+            ),
         ],
-        outputs: &[output("ready", FieldKind::Bool)],
+        outputs: &[
+            output("ready", FieldKind::Bool),
+            output("address", FieldKind::String),
+        ],
     },
     // ── Integrations ─────────────────────────────────────────────────────
     ActionDef {

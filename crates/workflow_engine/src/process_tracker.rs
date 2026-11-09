@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
 
 use tokio::process::Child;
 use tokio::sync::broadcast;
@@ -27,10 +28,26 @@ use tokio::sync::broadcast;
 /// (`log_snapshot`, read when a log viewer first opens) is.
 const LOG_CAPACITY: usize = 1000;
 
+/// Which flow, and which run of it, started a process. A node that starts a
+/// server again on the next run of the flow replaces the one an earlier run
+/// left behind (`ProcessRegistry::stop_running_from_earlier_runs`), and the
+/// run is part of the key so a node inside a loop does not stop what its own
+/// earlier iterations started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessOwner {
+    /// The project folder and the flow's id together, so two flows (or two
+    /// projects) that happen to use the same node id never touch each other's
+    /// processes.
+    pub flow: String,
+    /// One per call of `run_workflow`.
+    pub run: String,
+}
+
 /// A live handle plus display metadata for one started process.
 struct Entry {
     child: Child,
     info: ProcessInfo,
+    owner: Option<ProcessOwner>,
     log: VecDeque<String>,
     /// Broadcasts each new line as it arrives — a log viewer already open
     /// subscribes to this instead of re-polling `log_snapshot`. Lagged
@@ -90,6 +107,20 @@ impl ProcessRegistry {
         url: Option<String>,
         child: Child,
     ) -> String {
+        self.register_owned(None, action_id, command, args, url, child)
+    }
+
+    /// [`Self::register`] for a process a flow run started, so a later run of
+    /// the same flow can find it again.
+    pub fn register_owned(
+        &self,
+        owner: Option<ProcessOwner>,
+        action_id: String,
+        command: String,
+        args: Vec<String>,
+        url: Option<String>,
+        child: Child,
+    ) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         let info = ProcessInfo {
             id: id.clone(),
@@ -107,6 +138,7 @@ impl ProcessRegistry {
             Entry {
                 child,
                 info,
+                owner,
                 log: VecDeque::new(),
                 log_tx,
             },
@@ -163,6 +195,90 @@ impl ProcessRegistry {
             .unwrap()
             .get(id)
             .map(|e| e.log_tx.subscribe())
+    }
+
+    /// The last `lines` lines `id` has printed, oldest-first, with the `"! "`
+    /// mark [`spawn_log_reader`] puts on stderr lines taken off.
+    pub fn log_tail(&self, id: &str, lines: usize) -> Vec<String> {
+        let entries = self.entries.lock().unwrap();
+        let Some(entry) = entries.get(id) else {
+            return Vec::new();
+        };
+        let skip = entry.log.len().saturating_sub(lines);
+        entry
+            .log
+            .iter()
+            .skip(skip)
+            .map(|line| line.strip_prefix("! ").unwrap_or(line).to_string())
+            .collect()
+    }
+
+    /// `Some(code)` once `id` has exited, noting it in the process's status;
+    /// `None` while it is still running or if `id` is unknown. A process
+    /// that ended without an exit code (killed by a signal) counts as -1,
+    /// the same as in [`Self::list`].
+    fn exit_code_if_exited(&self, id: &str) -> Option<i32> {
+        let mut entries = self.entries.lock().unwrap();
+        let entry = entries.get_mut(id)?;
+        if entry.info.status == ProcessStatus::Running
+            && let Ok(Some(exit_status)) = entry.child.try_wait()
+        {
+            entry.info.status = ProcessStatus::Exited(exit_status.code().unwrap_or(-1));
+        }
+        match entry.info.status {
+            ProcessStatus::Exited(code) => Some(code),
+            ProcessStatus::Running | ProcessStatus::Stopped => None,
+        }
+    }
+
+    /// Watches `id` for up to `window` and returns its exit code if it
+    /// exits in that time. A dev server that is going to fail (a missing
+    /// module, a port already taken) usually does so within a second; one
+    /// that is still running after `window` is taken to have started.
+    pub async fn wait_for_early_exit(&self, id: &str, window: Duration) -> Option<i32> {
+        let deadline = tokio::time::Instant::now() + window;
+        loop {
+            if let Some(code) = self.exit_code_if_exited(id) {
+                return Some(code);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Stops every process of the same flow and node that an *earlier* run
+    /// started and that is still running, and returns how many it stopped.
+    /// Processes from this same run are left alone (a node in a loop starts
+    /// several), and so are other flows' and other nodes'.
+    pub fn stop_running_from_earlier_runs(&self, owner: &ProcessOwner, action_id: &str) -> usize {
+        // `stop` takes the lock itself, so the ids are collected first.
+        let stale: Vec<String> = {
+            let mut entries = self.entries.lock().unwrap();
+            entries
+                .iter_mut()
+                .filter(|(_, entry)| {
+                    entry.info.action_id == action_id
+                        && entry
+                            .owner
+                            .as_ref()
+                            .is_some_and(|o| o.flow == owner.flow && o.run != owner.run)
+                })
+                .filter_map(|(id, entry)| {
+                    if entry.info.status == ProcessStatus::Running
+                        && let Ok(Some(exit_status)) = entry.child.try_wait()
+                    {
+                        entry.info.status = ProcessStatus::Exited(exit_status.code().unwrap_or(-1));
+                    }
+                    (entry.info.status == ProcessStatus::Running).then(|| id.clone())
+                })
+                .collect()
+        };
+        stale
+            .iter()
+            .filter(|id| self.stop(id.as_str()).is_ok())
+            .count()
     }
 
     /// A live snapshot of every tracked process, oldest-first — refreshes
@@ -457,5 +573,153 @@ mod tests {
             snapshot.last().unwrap(),
             &format!("line {}", LOG_CAPACITY + 4)
         );
+    }
+
+    /// Keeps running for about `seconds`. (`spawn_sleep` above uses `timeout`
+    /// on Windows, which quits at once when its input is not a console.)
+    fn spawn_long_running(seconds: u64) -> Child {
+        #[cfg(target_os = "windows")]
+        let mut cmd = tokio::process::Command::new("cmd");
+        #[cfg(target_os = "windows")]
+        cmd.args(["/C", &format!("ping -n {} 127.0.0.1 > nul", seconds + 1)]);
+        #[cfg(not(target_os = "windows"))]
+        let mut cmd = tokio::process::Command::new("sleep");
+        #[cfg(not(target_os = "windows"))]
+        cmd.arg(seconds.to_string());
+        cmd.stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null());
+        cmd.spawn()
+            .expect("spawn a long-running process for testing")
+    }
+
+    fn spawn_exiting_with(code: i32) -> Child {
+        #[cfg(target_os = "windows")]
+        let mut cmd = tokio::process::Command::new("cmd");
+        #[cfg(target_os = "windows")]
+        cmd.args(["/C", &format!("exit {code}")]);
+        #[cfg(not(target_os = "windows"))]
+        let mut cmd = tokio::process::Command::new("sh");
+        #[cfg(not(target_os = "windows"))]
+        cmd.args(["-c", &format!("exit {code}")]);
+        cmd.stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null());
+        cmd.spawn()
+            .expect("spawn a process that exits, for testing")
+    }
+
+    fn owner(flow: &str, run: &str) -> ProcessOwner {
+        ProcessOwner {
+            flow: flow.to_string(),
+            run: run.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_early_exit_returns_the_exit_code() {
+        let registry = ProcessRegistry::default();
+        let id = registry.register(
+            "start1".to_string(),
+            "exit".to_string(),
+            vec![],
+            None,
+            spawn_exiting_with(7),
+        );
+
+        let code = registry
+            .wait_for_early_exit(&id, Duration::from_secs(10))
+            .await;
+        assert_eq!(code, Some(7));
+        let list = registry.list();
+        let entry = list.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(entry.status, ProcessStatus::Exited(7));
+    }
+
+    #[tokio::test]
+    async fn wait_for_early_exit_gives_up_on_a_process_that_keeps_running() {
+        let registry = ProcessRegistry::default();
+        let id = registry.register(
+            "start1".to_string(),
+            "sleep".to_string(),
+            vec![],
+            None,
+            spawn_long_running(30),
+        );
+
+        let code = registry
+            .wait_for_early_exit(&id, Duration::from_millis(300))
+            .await;
+        assert_eq!(code, None);
+        registry.stop(&id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_for_early_exit_for_an_unknown_id_is_none() {
+        let registry = ProcessRegistry::default();
+        let code = registry
+            .wait_for_early_exit("never-registered", Duration::from_millis(100))
+            .await;
+        assert_eq!(code, None);
+    }
+
+    #[tokio::test]
+    async fn log_tail_keeps_the_last_lines_and_drops_the_stderr_mark() {
+        let registry = ProcessRegistry::default();
+        let id = registry.register(
+            "start1".to_string(),
+            "sleep".to_string(),
+            vec![],
+            None,
+            spawn_long_running(30),
+        );
+        registry.append_log(&id, "one".to_string());
+        registry.append_log(&id, "! two".to_string());
+        registry.append_log(&id, "three".to_string());
+
+        assert_eq!(registry.log_tail(&id, 2), vec!["two", "three"]);
+        assert_eq!(registry.log_tail(&id, 10), vec!["one", "two", "three"]);
+        assert!(registry.log_tail("never-registered", 5).is_empty());
+        registry.stop(&id).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_running_from_earlier_runs_leaves_this_run_and_other_nodes_alone() {
+        let registry = ProcessRegistry::default();
+        let start = |owner: ProcessOwner, action_id: &str| {
+            registry.register_owned(
+                Some(owner),
+                action_id.to_string(),
+                "sleep".to_string(),
+                vec![],
+                None,
+                spawn_long_running(30),
+            )
+        };
+        let status_of = |id: &str| {
+            registry
+                .list()
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.status)
+                .unwrap()
+        };
+
+        let earlier_web = start(owner("flow", "run-1"), "web");
+        let earlier_api = start(owner("flow", "run-1"), "api");
+        let other_flow = start(owner("other", "run-1"), "web");
+        let this_run = start(owner("flow", "run-2"), "web");
+
+        let stopped = registry.stop_running_from_earlier_runs(&owner("flow", "run-2"), "web");
+
+        assert_eq!(stopped, 1);
+        assert_ne!(status_of(&earlier_web), ProcessStatus::Running);
+        assert_eq!(status_of(&earlier_api), ProcessStatus::Running);
+        assert_eq!(status_of(&other_flow), ProcessStatus::Running);
+        assert_eq!(status_of(&this_run), ProcessStatus::Running);
+
+        for id in [&earlier_api, &other_flow, &this_run] {
+            registry.stop(id).unwrap();
+        }
     }
 }
