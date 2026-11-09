@@ -30,6 +30,8 @@ which.workspace = true
 # builds of this headless crate.
 [target.'cfg(windows)'.dependencies]
 util.workspace = true
+# `process_job` ties a started process to the app's lifetime with a job object.
+windows = { workspace = true, features = ["Win32_System_JobObjects"] }
 
 [dev-dependencies]
 tempfile.workspace = true

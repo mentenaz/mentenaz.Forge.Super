@@ -800,6 +800,15 @@ fn last_run_tag(run: &RunHistoryEntry) -> impl IntoElement {
     .xsmall()
 }
 
+impl Drop for FlowsPanel {
+    fn drop(&mut self) {
+        // Closing the panel ends the runs it started: their servers stop.
+        for control in self.run_controls.values() {
+            control.stop();
+        }
+    }
+}
+
 impl Focusable for FlowsPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()

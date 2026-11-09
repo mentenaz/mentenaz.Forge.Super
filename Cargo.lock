@@ -24618,6 +24618,7 @@ dependencies = [
  "util",
  "uuid",
  "which",
+ "windows 0.62.2",
  "zed-reqwest",
 ]
 

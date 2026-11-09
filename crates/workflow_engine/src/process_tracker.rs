@@ -54,6 +54,10 @@ struct Entry {
     /// receivers (viewer fell behind) just miss the oldest few lines, same
     /// trade-off every other broadcast channel in this codebase accepts.
     log_tx: broadcast::Sender<String>,
+    /// On Windows, the job object that kills the process when the app exits
+    /// for any reason (see `process_job`). Held, never read.
+    #[cfg(windows)]
+    _job: Option<crate::process_job::ProcessJob>,
 }
 
 /// Snapshot for display — no process handle, safe to clone into a UI list.
@@ -95,6 +99,13 @@ pub fn registry() -> Arc<ProcessRegistry> {
     REGISTRY.clone()
 }
 
+/// Stops every process any flow has started and that is still running. The app
+/// calls this as it quits. On Windows the processes are also tied to the app
+/// with a job object, so they die with it even when this has no time to run.
+pub fn stop_all_processes() -> usize {
+    registry().stop_all()
+}
+
 impl ProcessRegistry {
     /// Takes ownership of `child` — it lives here until `stop` or the
     /// process exits on its own. Returns the freshly-minted tracking id
@@ -133,6 +144,12 @@ impl ProcessRegistry {
             status: ProcessStatus::Running,
         };
         let (log_tx, _) = broadcast::channel(256);
+        #[cfg(windows)]
+        let _job = child.id().and_then(|pid| {
+            crate::process_job::ProcessJob::for_process(pid)
+                .map_err(|error| log::warn!("could not tie process {pid} to the app: {error}"))
+                .ok()
+        });
         self.entries.lock().unwrap().insert(
             id.clone(),
             Entry {
@@ -141,6 +158,8 @@ impl ProcessRegistry {
                 owner,
                 log: VecDeque::new(),
                 log_tx,
+                #[cfg(windows)]
+                _job,
             },
         );
         id
@@ -300,6 +319,15 @@ impl ProcessRegistry {
     /// and returns how many it stopped.
     pub fn stop_run(&self, owner: &ProcessOwner) -> usize {
         let ids = self.running_ids(|entry| entry.owner.as_ref() == Some(owner));
+        ids.iter()
+            .filter(|id| self.stop(id.as_str()).is_ok())
+            .count()
+    }
+
+    /// Stops every tracked process that is still running, whichever flow or
+    /// run started it, and returns how many it stopped.
+    pub fn stop_all(&self) -> usize {
+        let ids = self.running_ids(|_| true);
         ids.iter()
             .filter(|id| self.stop(id.as_str()).is_ok())
             .count()
@@ -638,6 +666,42 @@ mod tests {
             flow: flow.to_string(),
             run: run.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn stop_all_stops_every_running_process_of_every_flow() {
+        let registry = ProcessRegistry::default();
+        let mut ids = Vec::new();
+        for (flow, run) in [("flow-a", "1"), ("flow-b", "2")] {
+            ids.push(registry.register_owned(
+                Some(owner(flow, run)),
+                "web".to_string(),
+                "sleep".to_string(),
+                vec![],
+                None,
+                spawn_long_running(30),
+            ));
+        }
+        let finished = registry.register(
+            "build".to_string(),
+            "exit".to_string(),
+            vec![],
+            None,
+            spawn_exiting_with(0),
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert_eq!(registry.stop_all(), 2);
+
+        let list = registry.list();
+        for id in &ids {
+            let info = list.iter().find(|p| &p.id == id).unwrap();
+            assert_eq!(info.status, ProcessStatus::Stopped);
+        }
+        // The one that had already ended on its own keeps its own status.
+        let info = list.iter().find(|p| p.id == finished).unwrap();
+        assert_eq!(info.status, ProcessStatus::Exited(0));
+        assert_eq!(registry.stop_all(), 0);
     }
 
     #[tokio::test]

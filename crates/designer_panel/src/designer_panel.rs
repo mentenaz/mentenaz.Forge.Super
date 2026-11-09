@@ -222,6 +222,14 @@ pub struct ShowInvalidFlowToast(String);
 /// matching registration here (it's wired via
 /// `workspace::register_project_item` instead).
 pub fn init(cx: &mut gpui::App) {
+    // Servers a flow started do not outlive the app. On Windows they are also
+    // tied to it with a job object, which covers a quit that gives this no
+    // time to run (gpui allows quit handlers only a moment) and a crash.
+    cx.on_app_quit(|_| async {
+        workflow_engine::stop_all_processes();
+    })
+    .detach();
+
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, action: &ViewRaw, window, cx| {
             // Deliberately not `workspace.open_abs_path` — that still routes
@@ -4955,6 +4963,10 @@ impl DesignerPanel {
 
 impl Drop for DesignerPanel {
     fn drop(&mut self) {
+        // Closing the tab ends a run that is still going: its servers stop.
+        if let Some(control) = &self.run_control {
+            control.stop();
+        }
         run_state::unregister_run_state(&self.path);
     }
 }

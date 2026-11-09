@@ -112,6 +112,11 @@ none is left. Three things end it sooner:
 
 `run_workflow` is the same without a handle, so it cannot be stopped.
 
+**Servers do not outlive the app.** Closing a Designer tab or the Flows panel
+stops the runs it started. Quitting calls `stop_all_processes`, and on Windows
+every started process is also put in a job object that is killed when the app
+exits for any reason (a crash, the Task Manager), so no handler has to run.
+
 **Re-running a flow replaces its servers.** Before it starts, a `StartProcess`
 stops any server that an *earlier run of the same flow* started for the same
 node and that is still running. Nodes inside a loop do not stop each other

@@ -16,6 +16,8 @@ pub mod engine;
 pub mod executors;
 pub mod history;
 pub mod layout;
+#[cfg(windows)]
+mod process_job;
 pub mod process_tracker;
 pub mod project_scan;
 pub mod registry;
@@ -32,7 +34,7 @@ pub use engine::RunContext;
 pub use executors::execute_leaf;
 pub use history::{ActionHistoryRecord, RunHistoryEntry};
 pub use layout::WorkflowLayout;
-pub use process_tracker::{ProcessInfo, ProcessStatus};
+pub use process_tracker::{ProcessInfo, ProcessStatus, stop_all_processes};
 pub use project_scan::{DetectedService, ServiceKind, scan as scan_project};
 pub use registry::{ActionCategory, ActionDef, CatalogGroup, FieldKind, InputField, OutputField};
 pub use run_control::{RunControl, STOPPED_MESSAGE};

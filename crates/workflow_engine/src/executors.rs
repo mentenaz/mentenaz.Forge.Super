@@ -1626,13 +1626,30 @@ mod tests {
                 };
                 let status = statuses[served.min(statuses.len() - 1)];
                 served += 1;
-                let mut buf = [0u8; 1024];
-                let _ = socket.read(&mut buf).await;
-                let response = format!(
-                    "HTTP/1.1 {status} Status\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
-                let _ = socket.shutdown().await;
+                // One task per connection, so a client that connects and says
+                // nothing (the port probe) never holds up the next request.
+                tokio::spawn(async move {
+                    // Read the whole request head before answering: closing a
+                    // socket with unread data makes Windows reset the
+                    // connection, and the client then sees an error instead of
+                    // the status.
+                    let mut head = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => head.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let response = format!(
+                        "HTTP/1.1 {status} Status\r\nLocation: /elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                    // Wait for the client to hang up first.
+                    let _ = tokio::time::timeout(Duration::from_millis(500), socket.read(&mut buf))
+                        .await;
+                });
             }
         });
         format!("http://127.0.0.1:{port}/")

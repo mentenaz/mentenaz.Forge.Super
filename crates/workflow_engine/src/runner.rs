@@ -861,8 +861,20 @@ processes: {processes:?}",
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        let process: Vec<String> = crate::process_tracker::registry()
+            .list()
+            .into_iter()
+            .filter(|p| p.action_id == "talker")
+            .map(|p| {
+                format!(
+                    "{:?} log: {:?}",
+                    p.status,
+                    crate::process_tracker::registry().log_tail(&p.id, 20)
+                )
+            })
+            .collect();
         panic!(
-            "the output never reached the sink: {:?}",
+            "the output never reached the sink: {:?}; the process: {process:?}",
             lines.lock().unwrap()
         );
     }
