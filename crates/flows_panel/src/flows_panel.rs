@@ -56,8 +56,9 @@ use gpui_component::{
 use project::Project;
 use settings::{DockSide, Settings as _};
 use workflow_engine::{
-    ActionHistoryRecord, ActionMap, DetectedService, RunHistoryEntry, RunOutcome, RunStatus,
-    ServiceSpec, StatusSink, WorkflowDefinition, run_workflow, scan_project, task_chain,
+    ActionHistoryRecord, ActionMap, DetectedService, RunControl, RunEnd, RunHistoryEntry,
+    RunOutcome, RunStatus, ServiceSpec, StatusSink, WorkflowDefinition, run_workflow_controlled,
+    scan_project, task_chain,
 };
 pub use flows_panel_settings::FlowsPanelSettings;
 use workspace::{
@@ -265,6 +266,9 @@ pub struct FlowsPanel {
     /// start a second concurrent run from another click of its own Run
     /// button (nothing stops two *different* flows running at once).
     running: std::collections::HashSet<String>,
+    /// The handle of each live run, so its Stop button can end it and the
+    /// servers it started.
+    run_controls: HashMap<String, RunControl>,
     error: Option<String>,
     wizard: Option<TaskChainWizard>,
 }
@@ -293,6 +297,7 @@ impl FlowsPanel {
                 project,
                 entries: Vec::new(),
                 running: std::collections::HashSet::new(),
+                run_controls: HashMap::new(),
                 error: None,
                 wizard: None,
             };
@@ -599,6 +604,14 @@ impl FlowsPanel {
         cx.notify();
     }
 
+    /// Stops a live run: its servers are killed, and the run ends as stopped.
+    fn on_stop_click(&mut self, id: String, cx: &mut Context<Self>) {
+        if let Some(control) = self.run_controls.get(&id) {
+            control.stop();
+        }
+        cx.notify();
+    }
+
     fn on_run_click(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.running.contains(&id) {
             return;
@@ -657,6 +670,8 @@ impl FlowsPanel {
             });
         });
 
+        let control = RunControl::new();
+        self.run_controls.insert(id.clone(), control.clone());
         self.error = None;
         self.running.insert(id.clone());
         cx.notify();
@@ -664,24 +679,31 @@ impl FlowsPanel {
         let store = db::kvp::KeyValueStore::from_app_db(cx.global::<db::AppDatabase>());
 
         cx.spawn_in(window, async move |this, cx| {
-            let result = run_workflow(def, root, status).await;
-            let outcome = if result.is_ok() {
-                RunOutcome::Succeeded
-            } else {
-                RunOutcome::Failed
+            let end = run_workflow_controlled(def, root, status, control).await;
+            // A stopped run is not a failure: its servers did what they were
+            // meant to until they were stopped.
+            let (outcome, stopped) = match &end {
+                RunEnd::Completed => (RunOutcome::Succeeded, false),
+                RunEnd::Failed(_) => (RunOutcome::Failed, false),
+                RunEnd::Stopped => (RunOutcome::Succeeded, true),
             };
             let history_entry = RunHistoryEntry {
                 id: format!("run-{}", chrono::Utc::now().timestamp_millis()),
                 time: chrono::Utc::now().to_rfc3339(),
                 outcome,
+                stopped,
                 actions: records.lock().unwrap().clone(),
             };
             let _ = persistence::append_flow_history(&store, &namespace, &id, history_entry).await;
 
             let _ = this.update_in(cx, |this, _window, cx| {
                 this.running.remove(&id);
+                this.run_controls.remove(&id);
                 this.rescan(cx);
-                this.error = result.err().map(|e| format!("Run failed: {e}"));
+                this.error = match end {
+                    RunEnd::Failed(e) => Some(format!("Run failed: {e}")),
+                    RunEnd::Completed | RunEnd::Stopped => None,
+                };
                 cx.notify();
             });
         })
@@ -713,7 +735,22 @@ impl FlowsPanel {
                 row.child(last_run_tag(run))
             })
             .child(if running {
-                Spinner::new().xsmall().into_any_element()
+                let stop_id = id.clone();
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(Spinner::new().xsmall())
+                    .child(
+                        Button::new(SharedString::from(format!("flow-stop-{id}")))
+                            .danger()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip("Stop this run and the servers it started")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.on_stop_click(stop_id.clone(), cx);
+                            })),
+                    )
+                    .into_any_element()
             } else {
                 Button::new(SharedString::from(format!("flow-run-{id}")))
                     .ghost()
@@ -753,6 +790,9 @@ impl FlowsPanel {
 }
 
 fn last_run_tag(run: &RunHistoryEntry) -> impl IntoElement {
+    if run.stopped {
+        return Tag::warning().outline().child("last run stopped").xsmall();
+    }
     match run.outcome {
         RunOutcome::Succeeded => Tag::success().outline().child("last run ok"),
         _ => Tag::danger().outline().child("last run failed"),

@@ -22,7 +22,7 @@ use gpui_component::{
 };
 use workspace::{Workspace, item::Item};
 
-use crate::run_state::{RunLogLine, RunPhase, RunState, SharedRunState, run_state_for};
+use crate::run_state::{LineKind, RunLogLine, RunPhase, RunState, SharedRunState, run_state_for};
 use crate::{format_detail, format_ms, phase_color};
 
 /// Displays one flow's live run results. Bound to a flow by its absolute
@@ -129,6 +129,9 @@ impl RunResults {
     }
 
     fn outcome_tag(&self) -> Tag {
+        if self.snapshot.stopped {
+            return Tag::warning().outline();
+        }
         match self.snapshot.outcome {
             None if self.snapshot.started_at.is_none() => Tag::secondary().outline(),
             None => Tag::info().outline(),
@@ -154,6 +157,7 @@ impl RunResults {
     ) -> impl IntoElement {
         let tag = match run.phase {
             RunPhase::Running => Tag::primary().outline(),
+            RunPhase::Ready => Tag::info().outline(),
             RunPhase::Succeeded => Tag::success().outline(),
             RunPhase::Failed => Tag::danger().outline(),
             RunPhase::Skipped => Tag::secondary().outline(),
@@ -219,7 +223,10 @@ impl RunResults {
         index: usize,
         line: &RunLogLine,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
+        if line.kind != LineKind::Status {
+            return self.render_output_row(index, line, cx).into_any_element();
+        }
         let color = phase_color(line.phase, cx.theme());
         let detail = line.detail.as_deref().unwrap_or("");
         let phase_label = if line.phase == RunPhase::Running {
@@ -272,6 +279,44 @@ impl RunResults {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("{}ms", line.time_ms)),
+            )
+            .into_any_element()
+    }
+
+    /// One line a command printed: quieter than a status row, in monospace, and
+    /// red for stderr.
+    fn render_output_row(
+        &self,
+        index: usize,
+        line: &RunLogLine,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let text_color = if line.kind == LineKind::Stderr {
+            cx.theme().danger
+        } else {
+            cx.theme().muted_foreground
+        };
+        h_flex()
+            .id(SharedString::from(format!("run-results-log-row-{index}")))
+            .w_full()
+            .gap_2()
+            .items_center()
+            .px_3()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(line.name.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .font_family("monospace")
+                    .text_color(text_color)
+                    .child(line.detail.clone().unwrap_or_default()),
             )
     }
 
@@ -362,7 +407,9 @@ impl Render for RunResults {
         let (succeeded, failed, skipped) = self.snapshot.totals();
         let run_is_live = self.snapshot.started_at.is_some() && self.snapshot.finished_at.is_none();
         let tag = self.outcome_tag();
-        let tag_text = if self.snapshot.outcome.is_none() && self.snapshot.started_at.is_some() {
+        let tag_text = if self.snapshot.stopped {
+            "Stopped"
+        } else if self.snapshot.outcome.is_none() && self.snapshot.started_at.is_some() {
             "Running"
         } else if self.snapshot.outcome.is_none() {
             "No run yet"

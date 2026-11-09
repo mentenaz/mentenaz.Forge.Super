@@ -68,11 +68,11 @@ use gpui_flow::{
 };
 use notifications::status_toast::StatusToast;
 use project::Project;
-use run_state::{ActionRun, RunLogLine, RunPhase, RunState, SharedRunState};
+use run_state::{ActionRun, LineKind, RunLogLine, RunPhase, RunState, SharedRunState};
 use workflow_engine::{
-    ActionHistoryRecord, FieldKind, InputField, RunHistoryEntry, RunOutcome, RunStatus,
-    ScriptRuntime, ScriptSource, StatusSink, ValidationIssue, ValidationSeverity,
-    WorkflowDefinition, registry::REGISTRY, run_workflow, validate_definition,
+    ActionHistoryRecord, FieldKind, InputField, RunControl, RunEnd, RunHistoryEntry, RunOutcome,
+    RunStatus, ScriptRuntime, ScriptSource, StatusSink, ValidationIssue, ValidationSeverity,
+    WorkflowDefinition, registry::REGISTRY, run_workflow_controlled, validate_definition,
 };
 use workspace::{
     ItemId, Pane, ProjectItem, SerializableItem, Workspace, WorkspaceId,
@@ -853,6 +853,9 @@ pub struct DesignerPanel {
     new_prop_key: Entity<InputState>,
     new_prop_value: Entity<InputState>,
     running: bool,
+    /// The handle of the run that is going, so Stop can end it and the servers
+    /// it started. `None` when no run is live.
+    run_control: Option<RunControl>,
     status: Option<String>,
     error: Option<String>,
     /// Validation issues from the last `revalidate()` call, keyed by the
@@ -1018,6 +1021,7 @@ impl DesignerPanel {
             new_prop_key,
             new_prop_value,
             running: false,
+            run_control: None,
             status: None,
             error: loaded.error,
             validation_issues: Vec::new(),
@@ -2469,6 +2473,16 @@ impl DesignerPanel {
         self.revalidate(cx);
     }
 
+    /// Stops the live run: its servers are killed, nodes that have not started
+    /// are skipped, and the run ends as stopped.
+    fn on_stop_click(&mut self, cx: &mut Context<Self>) {
+        if let Some(control) = &self.run_control {
+            control.stop();
+            self.status = Some("Stopping\u{2026}".to_string());
+            cx.notify();
+        }
+    }
+
     fn on_run_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.running {
             return;
@@ -2527,10 +2541,12 @@ impl DesignerPanel {
         let records_for_sink = records.clone();
         let sink_state = run_state.clone();
         let sink_meta = action_meta.clone();
+        let output_state = run_state.clone();
+        let output_meta = action_meta.clone();
         let status = StatusSink::with_scope(move |scope, action_id, status, detail| {
             let phase = match status {
                 RunStatus::Running => RunPhase::Running,
-                RunStatus::Ready => RunPhase::Running,
+                RunStatus::Ready => RunPhase::Ready,
                 RunStatus::Succeeded => RunPhase::Succeeded,
                 RunStatus::Failed => RunPhase::Failed,
                 RunStatus::Skipped => RunPhase::Skipped,
@@ -2548,14 +2564,16 @@ impl DesignerPanel {
                 name.clone(),
                 type_id.clone(),
             );
-            if matches!(phase, RunPhase::Running) {
+            // A server that is up is not finished: its last report, when it
+            // ends, is the one that goes into the history.
+            if matches!(phase, RunPhase::Running | RunPhase::Ready) {
                 return;
             }
             let outcome = match phase {
                 RunPhase::Succeeded => RunOutcome::Succeeded,
                 RunPhase::Failed => RunOutcome::Failed,
                 RunPhase::Skipped => RunOutcome::Skipped,
-                RunPhase::Running => return,
+                RunPhase::Running | RunPhase::Ready => return,
             };
             records_for_sink.lock().unwrap().push(ActionHistoryRecord {
                 id: action_id.to_string(),
@@ -2565,8 +2583,20 @@ impl DesignerPanel {
                 message: detail,
                 response: None,
             });
+        })
+        .with_output(move |scope, action_id, stream, line| {
+            let (name, type_id) = output_meta
+                .get(action_id)
+                .cloned()
+                .unwrap_or_else(|| (action_id.to_string(), "unknown".to_string()));
+            output_state
+                .lock()
+                .unwrap()
+                .record_output(started_at, scope, action_id, name, type_id, stream, line);
         });
 
+        let control = RunControl::new();
+        self.run_control = Some(control.clone());
         self.error = None;
         self.running = true;
         self.status = Some("Running\u{2026}".to_string());
@@ -2581,16 +2611,19 @@ impl DesignerPanel {
         let run_state_for_finish = run_state.clone();
 
         cx.spawn_in(window, async move |this, cx| {
-            let result = run_workflow(def, root, status).await;
-            let outcome = if result.is_ok() {
-                RunOutcome::Succeeded
-            } else {
-                RunOutcome::Failed
+            let end = run_workflow_controlled(def, root, status, control).await;
+            // A stopped run is not a failure: its servers did what they were
+            // meant to until they were stopped.
+            let (outcome, stopped, error) = match &end {
+                RunEnd::Completed => (RunOutcome::Succeeded, false, None),
+                RunEnd::Failed(message) => (RunOutcome::Failed, false, Some(message.clone())),
+                RunEnd::Stopped => (RunOutcome::Succeeded, true, None),
             };
             {
                 let mut st = run_state_for_finish.lock().unwrap();
                 st.outcome = Some(outcome);
-                st.error = result.as_ref().err().cloned();
+                st.stopped = stopped;
+                st.error = error;
                 st.finished_at = Some(Instant::now());
                 st.revision += 1;
             }
@@ -2599,15 +2632,18 @@ impl DesignerPanel {
                 id: format!("run-{}", chrono::Utc::now().timestamp_millis()),
                 time: chrono::Utc::now().to_rfc3339(),
                 outcome,
+                stopped,
                 actions: records.lock().unwrap().clone(),
             };
             let _ = flows_panel_history_append(&store, &namespace, &flow_id, history_entry).await;
 
             let _ = this.update_in(cx, |this, _window, cx| {
                 this.running = false;
-                this.status = Some(match &result {
-                    Ok(()) => "Run succeeded".to_string(),
-                    Err(e) => format!("Run failed: {e}"),
+                this.run_control = None;
+                this.status = Some(match &end {
+                    RunEnd::Completed => "Run succeeded".to_string(),
+                    RunEnd::Failed(e) => format!("Run failed: {e}"),
+                    RunEnd::Stopped => "Run stopped".to_string(),
                 });
                 this.sync_run(cx);
                 // The run's results are what the type declarations for the
@@ -2633,6 +2669,26 @@ impl DesignerPanel {
         self.apply_status_colors(&st, cx);
         self.run_snapshot = st;
         self.run_revision = revision;
+        // While the run lasts, the status line says how many servers are up.
+        // (Once Stop has been pressed it says "Stopping" until the run ends.)
+        if self.running
+            && self
+                .run_control
+                .as_ref()
+                .is_some_and(|control| !control.is_stopped())
+        {
+            let up = self
+                .run_snapshot
+                .nodes
+                .values()
+                .filter(|run| run.phase == RunPhase::Ready)
+                .count();
+            self.status = Some(match up {
+                0 => "Running\u{2026}".to_string(),
+                1 => "Running \u{00b7} 1 server up".to_string(),
+                n => format!("Running \u{00b7} {n} servers up"),
+            });
+        }
         true
     }
 
@@ -2645,10 +2701,13 @@ impl DesignerPanel {
         let running_hex = hex(cx.theme().primary);
         let success_hex = hex(cx.theme().success);
         let danger_hex = hex(cx.theme().danger);
+        // A server that is up: not the running colour, and not the finished one.
+        let ready_hex = hex(cx.theme().info);
         self.state.update(cx, |state, cx| {
             for (id, run) in &st.nodes {
                 let color = match run.phase {
                     RunPhase::Running => Some(running_hex),
+                    RunPhase::Ready => Some(ready_hex),
                     RunPhase::Succeeded => Some(success_hex),
                     RunPhase::Failed => Some(danger_hex),
                     RunPhase::Skipped => None,
@@ -3375,7 +3434,20 @@ impl DesignerPanel {
                             ),
                     )
                     .child(if self.running {
-                        Spinner::new().xsmall().into_any_element()
+                        h_flex()
+                            .gap_1p5()
+                            .items_center()
+                            .child(Spinner::new().xsmall())
+                            .child(
+                                Button::new("designer-stop")
+                                    .danger()
+                                    .xsmall()
+                                    .icon(IconName::Close)
+                                    .label("Stop")
+                                    .tooltip("Stop this run and the servers it started")
+                                    .on_click(cx.listener(|this, _, _, cx| this.on_stop_click(cx))),
+                            )
+                            .into_any_element()
                     } else {
                         let error_count = self
                             .validation_issues
@@ -4977,6 +5049,7 @@ pub(crate) fn format_ms(d: Duration) -> String {
 pub(crate) fn phase_color(phase: RunPhase, theme: &Theme) -> gpui::Hsla {
     match phase {
         RunPhase::Running => theme.primary,
+        RunPhase::Ready => theme.info,
         RunPhase::Succeeded => theme.success,
         RunPhase::Failed => theme.danger,
         RunPhase::Skipped => theme.muted,
@@ -5604,6 +5677,7 @@ impl DesignerPanel {
     fn render_run_result(&self, run: &ActionRun, cx: &mut Context<Self>) -> impl IntoElement {
         let tag = match run.phase {
             RunPhase::Running => Tag::primary().outline(),
+            RunPhase::Ready => Tag::info().outline(),
             RunPhase::Succeeded => Tag::success().outline(),
             RunPhase::Failed => Tag::danger().outline(),
             RunPhase::Skipped => Tag::secondary().outline(),
@@ -5743,7 +5817,10 @@ impl DesignerPanel {
         index: usize,
         line: &RunLogLine,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::AnyElement {
+        if line.kind != LineKind::Status {
+            return self.render_output_row(index, line, cx).into_any_element();
+        }
         let color = phase_color(line.phase, cx.theme());
         let detail = line.detail.as_deref().unwrap_or("");
         let phase_label = if line.phase == RunPhase::Running {
@@ -5800,6 +5877,49 @@ impl DesignerPanel {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("{}ms", line.time_ms)),
+            )
+            .into_any_element()
+    }
+
+    /// One line a command printed: quieter than a status row, in monospace, and
+    /// red for stderr.
+    fn render_output_row(
+        &self,
+        index: usize,
+        line: &RunLogLine,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let text_color = if line.kind == LineKind::Stderr {
+            cx.theme().danger
+        } else {
+            cx.theme().muted_foreground
+        };
+        let action_id = line.action_id.clone();
+        h_flex()
+            .id(SharedString::from(format!("designer-log-row-{index}")))
+            .w_full()
+            .gap_2()
+            .items_center()
+            .px_3()
+            .hover(|d| d.bg(cx.theme().muted.opacity(0.2)))
+            .on_click(cx.listener(move |this, _event, _window, cx| {
+                this.select_node(action_id.clone().into(), cx);
+            }))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(line.name.clone()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .font_family("monospace")
+                    .text_color(text_color)
+                    .child(line.detail.clone().unwrap_or_default()),
             )
     }
 }

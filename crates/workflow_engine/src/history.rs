@@ -49,7 +49,16 @@ pub struct RunHistoryEntry {
     /// "skip"; reusing `RunOutcome` rather than a second bespoke enum for
     /// just two of its three variants.
     pub outcome: RunOutcome,
+    /// The run was stopped by the user before it ended. Its `outcome` is then
+    /// `Succeeded`: the servers did what they were meant to until they were
+    /// stopped. Entries saved before this field existed load as `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stopped: bool,
     pub actions: Vec<ActionHistoryRecord>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Appends `entry`, then drops the oldest entries beyond
@@ -84,6 +93,7 @@ mod tests {
             id: id.to_string(),
             time: "2026-09-11T00:00:00Z".to_string(),
             outcome,
+            stopped: false,
             actions: vec![record("a", RunOutcome::Succeeded)],
         }
     }
@@ -120,5 +130,23 @@ mod tests {
         let json = serde_json::to_string(&rec).unwrap();
         assert!(!json.contains("message"));
         assert!(!json.contains("response"));
+    }
+
+    #[test]
+    fn a_stopped_run_round_trips_and_an_old_entry_loads_as_not_stopped() {
+        let mut stopped = entry("run-stopped", RunOutcome::Succeeded);
+        stopped.stopped = true;
+        let json = serde_json::to_string(&stopped).unwrap();
+        assert!(json.contains("\"stopped\":true"), "{json}");
+        let back: RunHistoryEntry = serde_json::from_str(&json).unwrap();
+        assert!(back.stopped);
+
+        // A run that was not stopped does not write the field at all...
+        let normal = serde_json::to_string(&entry("run-ok", RunOutcome::Succeeded)).unwrap();
+        assert!(!normal.contains("stopped"), "{normal}");
+        // ...and an entry saved before the field existed loads as not stopped.
+        let old = r#"{"id":"old","time":"2026-09-11T00:00:00Z","outcome":"Failed","actions":[]}"#;
+        let loaded: RunHistoryEntry = serde_json::from_str(old).unwrap();
+        assert!(!loaded.stopped);
     }
 }

@@ -83,6 +83,7 @@ mod tests {
             id: id.to_string(),
             time: "2026-09-11T00:00:00Z".to_string(),
             outcome,
+            stopped: false,
             actions: Vec::new(),
         }
     }

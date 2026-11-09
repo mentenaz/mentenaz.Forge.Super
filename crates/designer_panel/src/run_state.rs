@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use workflow_engine::{IterationScope, RunOutcome};
+use workflow_engine::{IterationScope, OutputStream, RunOutcome};
 
 /// One action's live phase, mirroring `workflow_engine::RunStatus` but
 /// owned by this crate so the UI can style it without pulling the engine's
@@ -23,6 +23,9 @@ use workflow_engine::{IterationScope, RunOutcome};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunPhase {
     Running,
+    /// A server the node started is up and still running; the nodes after it
+    /// have started. It ends later as `Succeeded` or `Failed`.
+    Ready,
     Succeeded,
     Failed,
     Skipped,
@@ -32,12 +35,27 @@ impl RunPhase {
     pub fn label(self) -> &'static str {
         match self {
             RunPhase::Running => "Running",
+            RunPhase::Ready => "Ready",
             RunPhase::Succeeded => "Succeeded",
             RunPhase::Failed => "Failed",
             RunPhase::Skipped => "Skipped",
         }
     }
 }
+
+/// What a line of the run transcript is: a status change of a node, or a line
+/// a command printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineKind {
+    Status,
+    Stdout,
+    Stderr,
+}
+
+/// How many lines a command printed are kept in the transcript. A dev server
+/// can print without end, so only the newest are kept; status lines are never
+/// dropped.
+pub const MAX_OUTPUT_LINES: usize = 2000;
 
 /// Everything the UI knows about a single action's status during/after a
 /// run. Keyed by the action's id — note a `Foreach` body action can be
@@ -75,7 +93,10 @@ pub struct RunLogLine {
     pub name: String,
     pub type_id: String,
     pub phase: RunPhase,
+    /// For a status line: the outputs or the error. For an output line: the
+    /// text the command printed.
     pub detail: Option<String>,
+    pub kind: LineKind,
 }
 
 /// What a run recorded about one `Foreach`: how many items it had, and the
@@ -119,6 +140,11 @@ pub struct RunState {
     pub finished_at: Option<Instant>,
     pub outcome: Option<RunOutcome>,
     pub error: Option<String>,
+    /// The run was stopped by the user before it ended.
+    pub stopped: bool,
+    /// How many entries of `log` are lines a command printed, not status
+    /// changes.
+    pub output_lines: usize,
     /// Bumped by every mutation so UI poll tasks can cheaply detect "new
     /// events since my last snapshot" without `PartialEq` on `Instant`s.
     pub revision: u64,
@@ -145,6 +171,8 @@ impl RunState {
             entry.detail = detail.clone();
             match phase {
                 RunPhase::Running => entry.started_at = Some(now),
+                // Up and running: not finished, and the clock keeps going.
+                RunPhase::Ready => {}
                 RunPhase::Succeeded | RunPhase::Failed | RunPhase::Skipped => {
                     entry.finished_at = Some(now);
                 }
@@ -202,7 +230,56 @@ impl RunState {
             type_id: type_id.clone(),
             phase,
             detail: detail.clone(),
+            kind: LineKind::Status,
         });
+        self.revision += 1;
+    }
+
+    /// One line a command printed, added to the transcript under the node that
+    /// ran it. Only the newest [`MAX_OUTPUT_LINES`] are kept.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_output(
+        &mut self,
+        run_start: Instant,
+        scope: &[IterationScope],
+        action_id: &str,
+        name: String,
+        type_id: String,
+        stream: OutputStream,
+        text: &str,
+    ) {
+        let log_name = match scope.last() {
+            Some(iteration) => format!("{name} [{}/{}]", iteration.index + 1, iteration.total),
+            None => name,
+        };
+        // The line is shown with the node's phase at that moment.
+        let phase = self
+            .nodes
+            .get(action_id)
+            .map(|run| run.phase)
+            .unwrap_or(RunPhase::Running);
+        self.log.push(RunLogLine {
+            time_ms: Instant::now().duration_since(run_start).as_millis(),
+            action_id: action_id.to_string(),
+            name: log_name,
+            type_id,
+            phase,
+            detail: Some(text.to_string()),
+            kind: match stream {
+                OutputStream::Stdout => LineKind::Stdout,
+                OutputStream::Stderr => LineKind::Stderr,
+            },
+        });
+        self.output_lines += 1;
+        if self.output_lines > MAX_OUTPUT_LINES
+            && let Some(oldest) = self
+                .log
+                .iter()
+                .position(|line| line.kind != LineKind::Status)
+        {
+            self.log.remove(oldest);
+            self.output_lines -= 1;
+        }
         self.revision += 1;
     }
 
@@ -216,7 +293,7 @@ impl RunState {
                 RunPhase::Succeeded => succeeded += 1,
                 RunPhase::Failed => failed += 1,
                 RunPhase::Skipped => skipped += 1,
-                RunPhase::Running => {}
+                RunPhase::Running | RunPhase::Ready => {}
             }
         }
         (succeeded, failed, skipped)
@@ -339,5 +416,109 @@ mod tests {
         assert!(state.iterations["outer:1/inner:0"].contains_key("leaf"));
         assert_eq!(state.loops["/outer"].total, 2);
         assert_eq!(state.loops["outer:1/inner"].total, 5);
+    }
+
+    fn status(state: &mut RunState, start: Instant, phase: RunPhase) {
+        state.record(
+            start,
+            &[],
+            "web",
+            phase,
+            None,
+            "Web".to_string(),
+            "StartProcess".to_string(),
+        );
+    }
+
+    #[test]
+    fn a_ready_node_is_not_finished_and_is_not_counted() {
+        let mut state = RunState::default();
+        let start = Instant::now();
+        status(&mut state, start, RunPhase::Running);
+        status(&mut state, start, RunPhase::Ready);
+
+        let web = &state.nodes["web"];
+        assert_eq!(web.phase, RunPhase::Ready);
+        assert!(web.started_at.is_some());
+        // Still going: its clock is not stopped.
+        assert!(web.finished_at.is_none());
+        assert_eq!(state.totals(), (0, 0, 0));
+
+        // It ends later, and only then is it counted.
+        status(&mut state, start, RunPhase::Succeeded);
+        assert!(state.nodes["web"].finished_at.is_some());
+        assert_eq!(state.totals(), (1, 0, 0));
+    }
+
+    #[test]
+    fn output_lines_join_the_transcript_under_their_node_with_its_phase() {
+        let mut state = RunState::default();
+        let start = Instant::now();
+        status(&mut state, start, RunPhase::Ready);
+        state.record_output(
+            start,
+            &[],
+            "web",
+            "Web".to_string(),
+            "StartProcess".to_string(),
+            OutputStream::Stderr,
+            "warning: slow",
+        );
+
+        let line = state.log.last().unwrap();
+        assert_eq!(line.kind, LineKind::Stderr);
+        assert_eq!(line.detail.as_deref(), Some("warning: slow"));
+        assert_eq!(line.name, "Web");
+        assert_eq!(line.phase, RunPhase::Ready);
+        assert_eq!(state.output_lines, 1);
+    }
+
+    #[test]
+    fn output_from_a_loop_iteration_names_the_iteration() {
+        let mut state = RunState::default();
+        state.record_output(
+            Instant::now(),
+            &[iteration("each", 1, 3)],
+            "web",
+            "Web".to_string(),
+            "StartProcess".to_string(),
+            OutputStream::Stdout,
+            "up",
+        );
+        assert_eq!(state.log.last().unwrap().name, "Web [2/3]");
+    }
+
+    #[test]
+    fn only_the_newest_output_lines_are_kept_and_status_lines_never_dropped() {
+        let mut state = RunState::default();
+        let start = Instant::now();
+        status(&mut state, start, RunPhase::Running);
+        for i in 0..(MAX_OUTPUT_LINES + 50) {
+            state.record_output(
+                start,
+                &[],
+                "web",
+                "Web".to_string(),
+                "StartProcess".to_string(),
+                OutputStream::Stdout,
+                &format!("line {i}"),
+            );
+        }
+
+        assert_eq!(state.output_lines, MAX_OUTPUT_LINES);
+        let output: Vec<_> = state
+            .log
+            .iter()
+            .filter(|line| line.kind != LineKind::Status)
+            .collect();
+        assert_eq!(output.len(), MAX_OUTPUT_LINES);
+        // The oldest 50 were dropped.
+        assert_eq!(output[0].detail.as_deref(), Some("line 50"));
+        assert_eq!(
+            output.last().unwrap().detail.as_deref(),
+            Some(format!("line {}", MAX_OUTPUT_LINES + 49).as_str())
+        );
+        // The status line from the start of the run is still there.
+        assert!(state.log.iter().any(|line| line.kind == LineKind::Status));
     }
 }
