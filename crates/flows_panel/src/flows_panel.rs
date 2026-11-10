@@ -1238,7 +1238,8 @@ impl FlowsPanel {
                                         .child(
                                             "Detected services from the open workspace. Review, edit, or \
                                              remove any of these, then Create — each included service \
-                                             starts concurrently.",
+                                             starts concurrently and counts as ready once its port \
+                                             answers.",
                                         ),
                                 )
                                 .when_some(error, |el, error| {

@@ -218,14 +218,53 @@ fn detect_python(dir: &Path, root: &Path) -> Option<DetectedService> {
         (ServiceKind::PythonApp, "python", vec![entry])
     };
 
+    // A project's packages live in its virtual environment, which a command
+    // started from the IDE does not activate: a bare `python` would be the
+    // system one and fail to import them. Use the environment's interpreter
+    // when there is one, and run a framework's launcher through it as a module,
+    // since `uvicorn` and `flask` are not on `PATH` either.
+    let (command, args) = match venv_python(dir, root) {
+        Some(python) => {
+            let python = python.to_string_lossy().to_string();
+            let module_args = |module: &str, args: Vec<String>| {
+                let mut all = vec!["-m".to_string(), module.to_string()];
+                all.extend(args);
+                all
+            };
+            match kind {
+                ServiceKind::FastApi => (python, module_args("uvicorn", args)),
+                ServiceKind::Flask => (python, module_args("flask", args)),
+                _ => (python, args),
+            }
+        }
+        None => (command.to_string(), args),
+    };
+
     Some(DetectedService {
         name,
         kind,
         relative_dir: relative_dir(dir, root),
-        command: command.to_string(),
+        command,
         args,
         port: kind.default_port(),
     })
+}
+
+/// The interpreter of the project's virtual environment: `.venv` or `venv`,
+/// in the project folder or in the workspace root (a monorepo usually has one
+/// environment beside its `backend` folder). Its absolute path, so it works
+/// whatever the working directory.
+fn venv_python(dir: &Path, root: &Path) -> Option<PathBuf> {
+    [dir, root]
+        .into_iter()
+        .flat_map(|base| [".venv", "venv"].map(|name| base.join(name)))
+        .flat_map(|venv| {
+            [
+                venv.join("Scripts").join("python.exe"),
+                venv.join("bin").join("python"),
+            ]
+        })
+        .find(|python| python.is_file())
 }
 
 #[cfg(test)]
@@ -394,5 +433,83 @@ mod tests {
         );
 
         assert!(scan(tmp.path()).is_empty());
+    }
+
+    fn fake_venv_python(base: &Path, venv: &str) -> PathBuf {
+        let scripts = base.join(venv).join("Scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        let python = scripts.join("python.exe");
+        std::fs::write(&python, "").unwrap();
+        python
+    }
+
+    #[test]
+    fn django_uses_the_virtual_environments_python_from_the_workspace_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = tmp.path().join("backend");
+        std::fs::create_dir(&backend).unwrap();
+        write(&backend, "manage.py", "# django");
+        let python = fake_venv_python(tmp.path(), ".venv");
+
+        let services = scan(tmp.path());
+        let found = services
+            .iter()
+            .find(|s| s.relative_dir == "backend")
+            .unwrap();
+        assert_eq!(found.kind, ServiceKind::Django);
+        assert_eq!(found.command, python.to_string_lossy());
+        assert_eq!(
+            found.args,
+            vec!["manage.py".to_string(), "runserver".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_project_folders_own_environment_wins_over_the_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let backend = tmp.path().join("backend");
+        std::fs::create_dir(&backend).unwrap();
+        write(&backend, "manage.py", "# django");
+        fake_venv_python(tmp.path(), ".venv");
+        let own = fake_venv_python(&backend, "venv");
+
+        let services = scan(tmp.path());
+        let found = services
+            .iter()
+            .find(|s| s.relative_dir == "backend")
+            .unwrap();
+        assert_eq!(found.command, own.to_string_lossy());
+    }
+
+    #[test]
+    fn fastapi_and_flask_run_as_modules_of_the_environments_python() {
+        let tmp = tempfile::tempdir().unwrap();
+        let api = tmp.path().join("api");
+        let web = tmp.path().join("web");
+        std::fs::create_dir(&api).unwrap();
+        std::fs::create_dir(&web).unwrap();
+        write(&api, "requirements.txt", "fastapi\nuvicorn\n");
+        write(&web, "requirements.txt", "flask\n");
+        let python = fake_venv_python(tmp.path(), ".venv");
+        let python = python.to_string_lossy().to_string();
+
+        let services = scan(tmp.path());
+        let api = services.iter().find(|s| s.relative_dir == "api").unwrap();
+        assert_eq!(api.command, python);
+        assert_eq!(
+            api.args,
+            vec![
+                "-m".to_string(),
+                "uvicorn".to_string(),
+                "main:app".to_string(),
+                "--reload".to_string()
+            ]
+        );
+        let web = services.iter().find(|s| s.relative_dir == "web").unwrap();
+        assert_eq!(web.command, python);
+        assert_eq!(
+            web.args,
+            vec!["-m".to_string(), "flask".to_string(), "run".to_string()]
+        );
     }
 }

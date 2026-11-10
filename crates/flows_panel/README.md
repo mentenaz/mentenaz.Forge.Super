@@ -71,6 +71,22 @@ adjust the Name, Command, Args, Working Dir and Port, tick or untick it, or
 remove it. **Add Custom Service** adds a blank row. **Create** writes a new
 flow that starts the selected services; **Cancel** discards it.
 
+Detection looks at the workspace root and its immediate subfolders for Node
+(`package.json`: React/Vite/Next frontends, Express/Fastify/Koa/Nest
+backends, other apps) and Python (Django, FastAPI, Flask, or a `main.py`,
+`app.py` or `server.py`) projects. Ports are the usual defaults for each kind
+(5173, 8000, 5000), not read from the project's own settings, so check them.
+A Python project that has a `.venv` or `venv` folder, in its own folder or in
+the workspace root, is started with that environment's interpreter (FastAPI
+and Flask run as `python -m uvicorn` and `python -m flask`), so its installed
+packages are found.
+
+The flow has, for each service, a `StartProcess` and a `WaitForPort`, and the
+services start in parallel. The `StartProcess` has `url` and `ready_port` set
+from the Port, so it turns Ready once the server answers on that port. If a
+server uses a different port from the one the wizard guessed, edit the Port
+before you create the flow.
+
 The Node panel's **Task Chain** quick action opens this same wizard anchored
 to that project.
 

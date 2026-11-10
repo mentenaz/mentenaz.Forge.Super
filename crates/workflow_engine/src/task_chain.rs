@@ -67,6 +67,12 @@ pub fn build(
             "url".to_string(),
             Value::String(format!("http://localhost:{}", service.port)),
         );
+        // A dev server never exits, so without a ready setting the node would
+        // wait for it to and the nodes after it would never start. The node is
+        // Ready, and releases them, once the port answers.
+        start
+            .inputs
+            .insert("ready_port".to_string(), Value::from(service.port));
         start.pos = Some((index as f32 * 260.0, 80.0));
 
         let mut wait = Action::new("WaitForPort");
@@ -149,6 +155,9 @@ mod tests {
         assert_eq!(start.inputs["command"], Value::from("npm"));
         assert_eq!(start.inputs["cwd"], Value::from("frontend"));
         assert_eq!(start.inputs["url"], Value::from("http://localhost:5173"));
+        // Ready once the port answers: without it a server's node would wait
+        // for the command to exit, and the run would never get past it.
+        assert_eq!(start.inputs["ready_port"], Value::from(5173));
         assert!(
             start.run_after.is_empty(),
             "StartProcess actions must be independent roots"
