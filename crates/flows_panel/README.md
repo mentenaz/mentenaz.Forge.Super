@@ -1,7 +1,8 @@
 # flows_panel
 
 A left-dock panel listing every workflow (`.flow.json`) in the open
-workspace, with buttons to create, open and run them.
+workspace, with buttons to create, open, run and stop them, and the links of
+the servers a running flow has started.
 
 ## Why it exists
 
@@ -27,17 +28,41 @@ Open with `ctrl-k f` (`cmd-k f` on macOS), the status bar icon (tooltip
 
 ### Each row
 
-| Button | Does                                                        |
-| ------ | ----------------------------------------------------------- |
-| Run    | Run the flow now; the row shows the outcome of the last run |
-| Open   | Open the flow through the normal file-open path             |
-| Graph  | Open the flow on the Designer canvas directly               |
+| Button | Does                                                                              |
+| ------ | --------------------------------------------------------------------------------- |
+| Run    | Run the flow now; the row shows the outcome of the last run                       |
+| Stop   | Replaces Run (with a spinner) while the flow is running: stops it and its servers |
+| Open   | Open the flow through the normal file-open path (disabled while it runs)          |
+| Graph  | Open the flow on the Designer canvas directly (disabled while it runs)            |
 
-Both buttons end up on the Designer canvas: the Designer claims every
+Both Open and Graph end up on the Designer canvas: the Designer claims every
 `.flow.json` file, so the normal file-open path leads there too. To see the
 raw JSON, use the **Raw** button in the Designer's toolbar.
 
-Rows are sorted by name.
+Rows are sorted by name. A row's tag says how the last run ended: **last run
+ok**, **last run failed** or **last run stopped**. A stopped run is not
+counted as a failure.
+
+### Running servers
+
+A flow that starts servers keeps running for as long as they do, so its row
+shows Stop until you press it. While it runs, a line appears under the row
+for each server that is up and has an address:
+
+```
+● Start backend:   http://localhost:8000    [open] [copy]
+● Start frontend:  http://127.0.0.1:5173/   [open] [copy]
+```
+
+**Open** launches the address in the browser and **Copy** puts it on the
+clipboard. The address comes from the node's `url`, else an address the
+server printed, else its `ready_url`, else `localhost:` and its `ready_port`
+(copy only). A server with none of these is not listed. The lines go away
+when the run ends. Running the same flow again first stops the servers its
+earlier run left, so there is one server per port.
+
+Closing the panel stops the runs it started. For per-node colours and the
+run log, run the flow from the Designer instead.
 
 ### Add Task Chain
 
@@ -84,9 +109,15 @@ The path is relative to the workspace root.
 | `src/flows_settings.rs` | The `"flows"` settings key (`FlowsSettings`)      |
 | `src/persistence.rs`    | Per-project run history                           |
 
-Running a flow calls `workflow_engine::run_workflow` directly and records the
-result. History is kept in Zed's scoped key-value store under the workspace
-root, as `history:<flow_id>`, capped at `MAX_HISTORY_ENTRIES` per flow.
+Running a flow calls `workflow_engine::run_workflow_controlled` with a
+`RunControl` kept per flow (`run_controls`). Stop calls `RunControl::stop`,
+the server lines read `RunControl::service_links`, and `Drop for FlowsPanel`
+stops every live run. The engine's status callback is not a UI event, so
+while a flow runs the panel repaints every half second. The result is
+recorded when the run ends. History is kept in Zed's scoped key-value store
+under the workspace root, as `history:<flow_id>`, capped at
+`MAX_HISTORY_ENTRIES` per flow. An entry has a `stopped` flag, and entries
+saved before it existed load as not stopped.
 
 Related crates: [`workflow_engine`](../workflow_engine/README.md) (execution)
 and [`designer_panel`](../designer_panel/README.md) (the canvas).
@@ -94,8 +125,9 @@ and [`designer_panel`](../designer_panel/README.md) (the canvas).
 ## Differences from Forge
 
 - No favourites, tags or separate flows index table.
-- Runs started here record final per-action outcomes only. For live
-  per-action status, run the flow from the Designer.
+- Runs started here record final per-action outcomes only, and show Stop and
+  the server links but not per-node status or the run log. For those, run the
+  flow from the Designer.
 
 ## Development
 

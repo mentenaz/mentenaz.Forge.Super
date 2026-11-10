@@ -64,12 +64,17 @@ features and do not appear in the catalog (see
 | Button | Does |
 | --- | --- |
 | Run | Run the flow. Disabled while blocking validation errors remain |
+| Stop | Takes Run's place while a run is live: stops the run and the servers it started |
 | Save | Write the flow and its layout |
 | Fit View | Zoom to show the whole graph |
 | Raw | Open the underlying JSON as text |
+| Run log | Show or hide the run log under the canvas (appears once a run has produced something) |
 | Results | Open the Run Results tab for this flow |
 | Clear results | Clear run results and status colours from the canvas |
 | Issues badge | Show what is blocking Run |
+
+While a run is live the toolbar also names the node that is running, with a
+spinner, and a short status ("Stopping…", "Run stopped").
 
 A flow with unsaved edits shows the usual unsaved marker on its tab, saves
 with the workspace save keybinding as well as the Save button, and asks
@@ -151,6 +156,49 @@ files and body files are ordinary files you can commit, and a flow needs its
 While a flow runs, nodes are coloured by status and a log pane shows
 progress. Selecting a node shows its result in the inspector.
 
+A node is **Running**, **Ready**, **Succeeded**, **Failed** or **Skipped**.
+**Ready** belongs to a node that starts a server (`StartProcess` with a
+`ready_*` setting): the server is up and still running, so the node is not
+finished, but the nodes after it can start. How a command node behaves is
+described in [`workflow_engine`](../workflow_engine/README.md#commands-and-servers-startprocess-and-waitforport):
+a command that ends (a build) finishes when it exits, and a server stays up
+until the run is stopped.
+
+#### Servers and Stop
+
+A run lasts as long as the servers it started, so the toolbar keeps showing
+**Stop** after the last node has finished. Stop ends the run, kills every
+server it started and skips the nodes that had not started. A stopped run is
+not a failure. A server that exits with an error fails the run and stops the
+others, and so does a node that fails.
+
+- **Re-running** a flow stops the servers that an earlier run of the same
+  flow left on the same node, so there is one server per port.
+- **Closing the tab** stops the run it started. **Quitting the app** stops
+  every server a flow started; on Windows they are also tied to the app, so
+  they end even if it crashes.
+- A `StartProcess` with no `ready_*` setting waits for its command to exit,
+  so a dev server there holds back every node after it. The inspector warns
+  about a command that looks like a server.
+
+#### The run log
+
+The log under the canvas lists each node's status changes and, in monospace
+under its node, the lines its command prints, as they arrive. Terminal colour
+codes are removed, empty lines are left out, and error output is red. Only
+the newest 2,000 output lines are kept; status lines are never dropped.
+Selecting a row selects its node.
+
+#### The servers bar
+
+Once a server is Ready and has an address, a bar under the toolbar lists it:
+`Start frontend: http://127.0.0.1:5173/` with **Open** (browser) and **Copy**
+buttons. The address is the node's `url` input, else the first local address
+the server printed, else its `ready_url`, else `localhost:` and its
+`ready_port` (copy only, as a port alone is not known to be a web page). A
+server with nothing to show is left out, and the bar is gone once the run
+ends.
+
 A Foreach body runs once per item, so an action inside one has a result per
 iteration. The inspector shows a pager for the loop, `For each · <loop>
 ‹ 2 / 12 ›`, with the item that iteration ran for, and the result shown
@@ -160,6 +208,39 @@ its most recent iteration's, and the log marks each line with its iteration
 (`Charge [2/12]`). **Results** opens a read-only Run Results tab for the most recent
 run. It keeps updating even if the Designer tab that started the run is
 closed.
+
+## Walkthrough: start a backend and a frontend
+
+A flow that brings up two dev servers and gives you their links.
+
+1. In the Flows panel choose **New Workflow** (or **Add Task Chain** to have
+   the services detected for you). The flow opens in the Designer.
+2. Click **Start Process** in the catalog twice and label the nodes, for
+   example *Start backend* and *Start frontend*.
+3. Select *Start backend* and fill in the inspector:
+   - `command`: `python` (or the full path to the project's `.venv`
+     interpreter, since the project's virtual environment is not activated)
+   - `args`: `["manage.py", "runserver"]`
+   - `cwd`: `backend`
+   - `url`: `http://localhost:8000`
+   - **Add an optional input → `ready_port`**: `8000`
+4. Do the same for *Start frontend*: `command` `npm`, `args`
+   `["run", "dev", "--", "--host", "127.0.0.1", "--port", "5173",
+   "--strictPort"]`, `cwd` `frontend`, `url` `http://localhost:5173`,
+   `ready_port` `5173`.
+5. Without `ready_port` (or `ready_url` or `ready_text`) the node never turns
+   Ready, because a server never exits. This is the usual reason a run seems
+   stuck on "Running…".
+6. Press **Run**. Both nodes go Running, then Ready, and the servers bar
+   shows both links with **Open** and **Copy**. The run log shows what each
+   server prints.
+7. Press **Stop** when you are done: both servers are killed. Closing the tab
+   does the same.
+
+To run something after a server is up (a health check, a seed script), add
+the node after it; it starts as soon as the server is Ready. A `Wait For
+Port` node still works for a server you did not start from the flow, or to
+wait for an HTTP address to answer.
 
 ## Files the Designer writes
 
@@ -179,7 +260,10 @@ automatically in layers.
 - `designer_panel::init(cx)` (from `crates/zed/src/main.rs`) registers the
   workspace-wide action handlers and calls
   `workspace::register_project_item::<DesignerPanel>` and
-  `register_serializable_item::<DesignerPanel>`.
+  `register_serializable_item::<DesignerPanel>`. It also registers the quit
+  hook that calls `workflow_engine::stop_all_processes()` (gpui gives quit
+  handlers about 200 ms, so on Windows the engine's job objects do the real
+  work).
 - `FlowFile` (`src/project_item.rs`) is the minimal `project::ProjectItem`
   that claims paths ending in `.flow.json`. Project item types are tried
   most-recently-registered first, and `try_open` returns `None` for anything
@@ -210,7 +294,7 @@ handle of its own. None are bindable from a keymap (`no_json`).
 | `src/project_item.rs` | `FlowFile`, which routes `.flow.json` here |
 | `src/script_companion.rs` | Inline script companion files |
 | `src/http_companion.rs` | HTTP body companion files |
-| `src/run_state.rs` | Thread-safe run state shared with Run Results |
+| `src/run_state.rs` | Thread-safe run state shared with Run Results: node phases (including `Ready`), the transcript, and the lines commands print |
 | `src/run_results.rs` | The Run Results tab |
 | `src/persistence.rs` | Restoring open Designer tabs |
 
@@ -233,7 +317,13 @@ canvas.
   without a parent. Undo restores all of it.
 - **Run status crosses threads.** The engine's status callback fires off the
   UI thread, so it fills an `Arc<Mutex<RunState>>` that the Designer and Run
-  Results tabs poll about ten times a second.
+  Results tabs poll about ten times a second. A command's output comes
+  through the sink's separate output callback into the same state
+  (`RunState::record_output`, capped at `MAX_OUTPUT_LINES`).
+- **The panel keeps the run's `RunControl`.** The run is started with
+  `run_workflow_controlled`; Stop calls `RunControl::stop`, the servers bar
+  reads `RunControl::service_links`, and `Drop for DesignerPanel` stops the
+  run when the tab closes. A stopped run is recorded as `stopped`, not failed.
 - **HTTP bodies are compared semantically**, not byte for byte, so
   reformatting the JSON does not register as a conflict. A body that is not
   valid JSON yet is stored verbatim.
