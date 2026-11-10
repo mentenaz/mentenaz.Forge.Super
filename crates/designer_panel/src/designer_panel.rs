@@ -5247,6 +5247,7 @@ impl Render for DesignerPanel {
             .size_full()
             .bg(cx.theme().background)
             .child(self.render_toolbar(cx))
+            .children(self.render_services(cx))
             .when_some(self.error.clone(), |el, error| {
                 el.child(
                     div()
@@ -5805,7 +5806,6 @@ impl DesignerPanel {
                             .on_click(cx.listener(|this, _, _, cx| this.on_toggle_log_click(cx))),
                     ),
             )
-            .children(self.render_services(cx))
             .child(
                 div()
                     .relative()
@@ -5825,20 +5825,27 @@ impl DesignerPanel {
             )
     }
 
-    /// The servers the live run has up and where to reach each, above the
-    /// transcript. `None` while there are none.
+    /// A bar under the toolbar with the servers the live run has up and where
+    /// to reach each. `None` while there are none, so the bar is only there
+    /// when it has something to show.
     fn render_services(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let links = self.run_control.as_ref()?.service_links();
+        // Only a server that has an address to show gets a chip.
+        let mut links = self.run_control.as_ref()?.service_links();
+        links.retain(|link| link.address.is_some());
         if links.is_empty() {
             return None;
         }
         Some(
-            v_flex()
+            h_flex()
+                .id("designer-services")
                 .w_full()
                 .flex_shrink_0()
+                .flex_wrap()
+                .items_center()
                 .px_3()
                 .py_1()
-                .gap_0p5()
+                .gap_x_4()
+                .gap_y_0p5()
                 .border_b_1()
                 .border_color(cx.theme().border)
                 .children(
@@ -5863,7 +5870,6 @@ impl DesignerPanel {
         let open_address = address.clone();
         let copy_address = address.clone();
         h_flex()
-            .w_full()
             .gap_2()
             .items_center()
             .child(
@@ -5875,9 +5881,6 @@ impl DesignerPanel {
             )
             .child(
                 div()
-                    .w(px(110.0))
-                    .flex_shrink_0()
-                    .truncate()
                     .text_xs()
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(cx.theme().foreground)
@@ -5885,9 +5888,6 @@ impl DesignerPanel {
             )
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
                     .text_xs()
                     .font_family("monospace")
                     .text_color(cx.theme().muted_foreground)

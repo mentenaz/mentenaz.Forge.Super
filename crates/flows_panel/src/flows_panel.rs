@@ -739,7 +739,9 @@ impl FlowsPanel {
         entry: &WorkflowEntry,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let links = self.run_controls.get(&entry.id)?.service_links();
+        // Only a server that has an address to show gets a row.
+        let mut links = self.run_controls.get(&entry.id)?.service_links();
+        links.retain(|link| link.address.is_some());
         if links.is_empty() {
             return None;
         }
