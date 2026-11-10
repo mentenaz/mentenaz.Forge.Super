@@ -259,6 +259,10 @@ let issues = validate_definition(&def);
 run_workflow(def, solution_root, status).await?;
 ```
 
+To be able to stop a run, and to ask which servers it has up, use
+`run_workflow_controlled(def, solution_root, status, control)` with a
+`RunControl` you keep a clone of.
+
 `run_workflow` owns its arguments and returns a `Send + 'static` future, so
 it can be handed to a tokio runtime. `solution_root` is only used by `script`
 actions in file mode. The status callback is invoked from whichever thread is
@@ -271,14 +275,15 @@ driving the run — do not touch UI state from it directly (see
 | --- | --- |
 | Schema | `WorkflowDefinition`, `Action`, `ActionMap`, `Branch`, `Limit`, `JsonLogicExpr`, `ScriptRuntime`, `ScriptSource`, `RunOutcome` |
 | Registry | `ActionDef`, `ActionCategory`, `CatalogGroup`, `FieldKind`, `InputField`, `OutputField` |
-| Running | `run_workflow`, `RunContext`, `execute_action`, `execute_leaf` |
+| Running | `run_workflow`, `run_workflow_controlled`, `RunEnd`, `RunContext`, `execute_action`, `execute_leaf` |
+| Run control | `RunControl` (`stop`, `service_links`), `ServiceLink`, `STOPPED_MESSAGE` |
 | Scheduling | `compute_levels`, `validate`, `LevelResult` |
 | Validation | `validate_definition`, `ValidationIssue`, `ValidationSeverity` |
-| Status | `RunStatus`, `StatusSink` |
+| Status | `RunStatus`, `StatusSink`, `OutputStream` |
 | History | `RunHistoryEntry`, `ActionHistoryRecord` |
 | Layout | `WorkflowLayout` |
 | Project scan | `scan_project`, `DetectedService`, `ServiceKind`, `ServiceSpec` |
-| Processes | `ProcessInfo`, `ProcessStatus` |
+| Processes | `ProcessInfo`, `ProcessStatus`, `stop_all_processes` |
 
 `scan_project` detects runnable services in a workspace; `task_chain` turns a
 list of `ServiceSpec`s into a flow. Together they back the Flows panel's
@@ -302,7 +307,8 @@ it seems to, the action is probably being modelled wrongly.
 | `src/schema.rs` | `flow.json` types and sidecar naming |
 | `src/registry.rs` | Every action type's definition |
 | `src/scheduler.rs` | Dependency levels and structural validation |
-| `src/runner.rs` | `run_workflow` |
+| `src/runner.rs` | `run_workflow`, `run_workflow_controlled` and the watch over a run's servers |
+| `src/run_control.rs` | `RunControl`: stopping a run, and the servers it has up |
 | `src/executors.rs` | Leaf executors (http, script, log, …) |
 | `src/container.rs` | Container executors (Foreach, Until, If, Try) |
 | `src/engine.rs` | `RunContext` and JSONLogic plumbing |
@@ -311,6 +317,7 @@ it seems to, the action is probably being modelled wrongly.
 | `src/history.rs` | Run history records |
 | `src/layout.rs` | `.flow.layout.json` sidecar |
 | `src/process_tracker.rs` | Tracking of started processes |
+| `src/process_job.rs` | Windows only: ties a started process to the app with a job object |
 | `src/project_scan.rs`, `src/task_chain.rs` | Service detection and task-chain generation |
 
 ## Development
