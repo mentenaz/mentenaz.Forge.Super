@@ -142,10 +142,25 @@ fn release_process(adopted: &Adopted, pid: u32) -> Result<(), String> {
 fn kill_process(system: &Mutex<System>, pid: u32) -> Result<(), String> {
     let sys = system.lock().map_err(|e| e.to_string())?;
     let target = sysinfo::Pid::from_u32(pid);
-    sys.process(target)
+    let killed = sys
+        .process(target)
         .ok_or_else(|| format!("Process {pid} not found"))?
         .kill();
-    Ok(())
+    kill_outcome(killed)
+}
+
+/// `sysinfo`'s `kill` says whether the system accepted the request. It does
+/// not when the process belongs to another user or to the system, or needs
+/// administrator rights, and the panel has to say so: otherwise the row just
+/// stays in the list and nothing explains why.
+fn kill_outcome(killed: bool) -> Result<(), String> {
+    if killed {
+        Ok(())
+    } else {
+        Err("the system refused. The process may belong to another user or the system, \
+             or need administrator rights"
+            .to_string())
+    }
 }
 
 // ── Table delegate ─────────────────────────────────────────────────────
@@ -1142,5 +1157,13 @@ mod tests {
         let system = Mutex::new(System::new());
         let error = kill_process(&system, u32::MAX - 1).unwrap_err();
         assert!(error.contains("not found"), "{error}");
+    }
+
+    #[test]
+    fn a_refused_kill_is_reported_and_an_accepted_one_is_not() {
+        assert_eq!(kill_outcome(true), Ok(()));
+        let error = kill_outcome(false).unwrap_err();
+        assert!(error.contains("refused"), "{error}");
+        assert!(error.contains("administrator"), "{error}");
     }
 }

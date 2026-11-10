@@ -51,7 +51,7 @@ pub async fn execute_leaf(
         "notify" => execute_notify(action, ctx).await,
         "log" => execute_log(action, ctx).await,
         "WaitForPort" => execute_wait_for_port(action).await,
-        "SetEnv" => execute_set_env(action),
+        "SetEnv" => execute_set_env(action, ctx),
         "StartProcess" => execute_start_process(action_id, ctx, action, solution_root).await,
         "InitVariable" => execute_init_variable(action, ctx),
         "SetVariable" => execute_set_variable(action, ctx),
@@ -380,6 +380,7 @@ async fn execute_script(
         .map_err(|e| format!("script: invalid \"source\": {e}"))?;
     let stdin_args = script_stdin(action, ctx)?;
     let context = ctx.script_context(stdin_args.as_ref());
+    let env = ctx.run_env();
     let solution_root = solution_root.to_path_buf();
 
     on_tokio(async move {
@@ -395,10 +396,26 @@ async fn execute_script(
             stdin_args,
             Some(&*context_file),
             working_dir(&solution_root),
+            &env,
         )
         .await
     })
     .await
+}
+
+/// Gives `cmd` the environment variables `SetEnv` set in this run, and the
+/// IDE's own runtimes (the built-in Node.js, …) first on `PATH`, so `node` is
+/// the version the project should use, installed or not on the machine
+/// itself. A `PATH` that the flow set itself is kept as it is.
+fn apply_run_env(cmd: &mut TokioCommand, env: &[(String, String)], working_dir: Option<&Path>) {
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    if !env.iter().any(|(key, _)| ide_env::is_path_variable(key))
+        && let Some(path) = ide_env::path_env(working_dir)
+    {
+        cmd.env("PATH", path);
+    }
 }
 
 /// The directory a script or started process runs in when the flow doesn't
@@ -543,6 +560,7 @@ async fn run_script_process(
     stdin_json: Option<Value>,
     context_file: Option<&Path>,
     working_dir: Option<&Path>,
+    env: &[(String, String)],
 ) -> Result<Map<String, Value>, String> {
     let mut cmd = TokioCommand::new(program);
     if let Some(context_file) = context_file {
@@ -551,12 +569,7 @@ async fn run_script_process(
     if let Some(working_dir) = working_dir {
         cmd.current_dir(working_dir);
     }
-    // The IDE's own runtimes (the built-in Node.js, …) go first on `PATH`,
-    // so `node` is the version the project should use, installed or not on
-    // the machine itself.
-    if let Some(path) = ide_env::path_env(working_dir) {
-        cmd.env("PATH", path);
-    }
+    apply_run_env(&mut cmd, env, working_dir);
     cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1266,6 +1279,7 @@ async fn execute_start_process(
         .map(str::to_string);
     let ready = ReadySettings::from_action(action)?;
     let action_id = action_id.to_string();
+    let env = ctx.run_env();
     let owner = ctx.process_owner().cloned();
     let control = ctx.control().clone();
     // Only a caller that asked for output gets it forwarded.
@@ -1314,11 +1328,10 @@ async fn execute_start_process(
         if let Some(cwd) = &cwd {
             cmd.current_dir(cwd);
         }
-        // As for scripts: the IDE's own runtimes first, so `npm run dev`
-        // starts under the project's Node.js version.
-        if let Some(path) = ide_env::path_env(cwd.as_deref()) {
-            cmd.env("PATH", path);
-        }
+        // As for scripts: what `SetEnv` set in this run, and the IDE's own
+        // runtimes first, so `npm run dev` starts under the project's Node.js
+        // version.
+        apply_run_env(&mut cmd, &env, cwd.as_deref());
         #[cfg(target_os = "windows")]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — no console flash.
 
@@ -1422,19 +1435,22 @@ fn quote_windows_arg(arg: &str) -> String {
     }
 }
 
-/// Direct port of the old `chain.rs`'s `execute_set_env_step`. Process-
-/// global, same as the original — not sandboxed per-run.
-fn execute_set_env(action: &Action) -> Result<Map<String, Value>, String> {
-    let key = require_str(action, "key")?;
-    let value = require_str(action, "value")?;
-    // SAFETY: matches the existing `unsafe { std::env::set_var(...) }`
-    // call sites already in this codebase (e.g. `zed/util/src/util.rs`) —
-    // edition 2024 marks `set_var` unsafe because it's not thread-safe to
-    // race with a concurrent `getenv` on some platforms; this call site
-    // has no such concurrent reader.
-    unsafe {
-        std::env::set_var(key, value);
+/// Sets an environment variable for the rest of this run: the scripts and
+/// started processes that come after it see it. It is kept in the run's own
+/// context and not in the app's environment, so it ends with the run and
+/// never reaches another run, another flow, or what the app starts later.
+/// (The original, a port of Forge's `execute_set_env_step`, set it for the
+/// whole process.)
+fn execute_set_env(action: &Action, ctx: &RunContext) -> Result<Map<String, Value>, String> {
+    let key = require_str(action, "key")?.trim();
+    if key.is_empty() || key.contains(['=', '\0']) {
+        return Err("SetEnv: \"key\" must be a name, without \"=\" and not blank".to_string());
     }
+    let value = resolve_string_field(action, "value", ctx)?;
+    if value.contains('\0') {
+        return Err("SetEnv: \"value\" must not contain a null character".to_string());
+    }
+    ctx.set_env(key, &value);
     Ok(Map::new())
 }
 
@@ -2336,17 +2352,100 @@ mod tests {
         assert!(err.contains("failed to start"));
     }
 
+    fn set_env_action(key: &str, value: &str) -> Action {
+        action_with_inputs(
+            "SetEnv",
+            vec![("key", Value::from(key)), ("value", Value::from(value))],
+        )
+    }
+
     #[test]
-    fn set_env_sets_a_process_env_var() {
+    fn set_env_sets_the_variable_for_the_run_and_not_for_the_app() {
+        let ctx = RunContext::new();
+        execute_set_env(&set_env_action("FORGE_WORKFLOW_SCOPE_TEST", "hello"), &ctx).unwrap();
+
+        assert_eq!(
+            ctx.run_env(),
+            vec![("FORGE_WORKFLOW_SCOPE_TEST".to_string(), "hello".to_string())]
+        );
+        // Not in the app's own environment, so nothing else it starts has it.
+        assert!(std::env::var("FORGE_WORKFLOW_SCOPE_TEST").is_err());
+        // Nor in another run.
+        assert!(RunContext::new().run_env().is_empty());
+    }
+
+    #[test]
+    fn set_env_value_can_be_an_expression() {
+        let ctx = RunContext::new();
+        ctx.init_variable(
+            "port",
+            crate::engine::VariableType::Integer,
+            Value::from(8080),
+        )
+        .unwrap();
         let action = action_with_inputs(
             "SetEnv",
             vec![
-                ("key", Value::from("FORGE_WORKFLOW_TEST_VAR")),
-                ("value", Value::from("hello")),
+                ("key", Value::from("PORT")),
+                ("value", serde_json::json!({"var": "variables.port"})),
             ],
         );
-        execute_set_env(&action).unwrap();
-        assert_eq!(std::env::var("FORGE_WORKFLOW_TEST_VAR").unwrap(), "hello");
+        execute_set_env(&action, &ctx).unwrap();
+        assert_eq!(
+            ctx.run_env(),
+            vec![("PORT".to_string(), "8080".to_string())]
+        );
+    }
+
+    #[test]
+    fn set_env_refuses_a_key_that_is_not_a_name() {
+        let ctx = RunContext::new();
+        for key in ["", "  ", "A=B", "A\0B"] {
+            let err = execute_set_env(&set_env_action(key, "x"), &ctx).unwrap_err();
+            assert!(err.contains("key"), "{key:?}: {err}");
+        }
+        assert!(ctx.run_env().is_empty());
+    }
+
+    /// What a process prints for `FORGE_RUN_ENV_TEST` when it is started with
+    /// `env` through [`apply_run_env`], which scripts and `StartProcess` both use.
+    async fn printed_run_env(env: &[(String, String)]) -> String {
+        #[cfg(target_os = "windows")]
+        let mut cmd = {
+            let mut c = TokioCommand::new("cmd");
+            c.args(["/C", "echo %FORGE_RUN_ENV_TEST%"]);
+            c
+        };
+        #[cfg(not(target_os = "windows"))]
+        let mut cmd = {
+            let mut c = TokioCommand::new("sh");
+            c.args(["-c", "echo $FORGE_RUN_ENV_TEST"]);
+            c
+        };
+        apply_run_env(&mut cmd, env, None);
+        let output = cmd
+            .output()
+            .await
+            .expect("start a process to print a variable");
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    #[tokio::test]
+    async fn a_process_started_after_set_env_sees_the_variable_and_one_in_another_run_does_not() {
+        let ctx = RunContext::new();
+        ctx.set_env("FORGE_RUN_ENV_TEST", "from-the-run");
+        assert!(
+            printed_run_env(&ctx.run_env())
+                .await
+                .contains("from-the-run")
+        );
+
+        let other = RunContext::new();
+        assert!(
+            !printed_run_env(&other.run_env())
+                .await
+                .contains("from-the-run")
+        );
     }
 
     #[tokio::test]

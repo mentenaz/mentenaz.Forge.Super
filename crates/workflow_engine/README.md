@@ -170,6 +170,16 @@ A `Foreach` runs its iterations concurrently, so iterations that all set the
 same variable race: the variable ends up holding whichever wrote last.
 `variables` can't be used as an action id.
 
+#### Environment variables: `SetEnv`
+
+`SetEnv` sets an environment variable **for the rest of the run**: the
+`script` and `StartProcess` actions that start after it see it. It lives in the
+run's own context (shared with loop bodies, like a variable), and is never set
+in the app's environment, so it cannot reach another run, another flow, or
+anything the app starts later. `key` must be a name without `=`; `value` can be
+text or a JSONLogic expression. A `PATH` set this way is used as it is, instead
+of the IDE's own runtimes being put first on it.
+
 #### `script`
 
 A script gets its input as JSON on standard input, and returns its result by

@@ -533,7 +533,11 @@ pub static REGISTRY: &[ActionDef] = &[
         catalog_group: CatalogGroup::Utilities,
         runnable: true,
         inputs: &[
-            req_h("key", FieldKind::String, "Variable name, e.g. DATABASE_URL"),
+            req_h(
+                "key",
+                FieldKind::String,
+                "Variable name, e.g. DATABASE_URL. Set for the scripts and processes the rest of this run starts, and no further",
+            ),
             req_h(
                 "value",
                 FieldKind::String,

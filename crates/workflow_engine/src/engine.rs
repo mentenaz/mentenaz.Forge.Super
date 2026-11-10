@@ -127,6 +127,12 @@ pub struct RunContext {
     /// race (a `Foreach` runs its iterations concurrently).
     variables: Arc<RwLock<Map<String, Value>>>,
     variable_types: Arc<RwLock<std::collections::HashMap<String, VariableType>>>,
+    /// The environment variables `SetEnv` has set in this run, for the
+    /// processes the run starts after it. One map for the whole run, like
+    /// `variables`: a `child()` context shares it. It is never copied into the
+    /// app's own environment, so a run cannot change another run, another
+    /// flow, or anything else the app starts.
+    env: Arc<RwLock<std::collections::HashMap<String, String>>>,
     /// Action id -> `{"outputs": {...}}`, written once per action as it
     /// completes and read by every JSONLogic evaluation from this point
     /// on. `Arc<RwLock<_>>` so concurrently-running sibling actions (§3's
@@ -158,6 +164,7 @@ impl RunContext {
         Self {
             variables: Arc::new(RwLock::new(Map::new())),
             variable_types: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            env: Arc::new(RwLock::new(std::collections::HashMap::new())),
             data: Arc::new(RwLock::new(Map::new())),
             item: None,
             engine: Arc::new(Engine::new()),
@@ -246,6 +253,29 @@ impl RunContext {
         context.insert("args".to_string(), args.cloned().unwrap_or(Value::Null));
         context.insert("actions".to_string(), Value::Object(actions));
         Value::Object(context)
+    }
+
+    /// Sets the environment variable `key` for the processes this run starts
+    /// from now on (scripts and `StartProcess`). Setting it again replaces it.
+    pub fn set_env(&self, key: &str, value: &str) {
+        self.env
+            .write()
+            .unwrap()
+            .insert(key.to_string(), value.to_string());
+    }
+
+    /// The environment variables `SetEnv` has set in this run, by name, for
+    /// a process about to be started.
+    pub fn run_env(&self) -> Vec<(String, String)> {
+        let mut env: Vec<(String, String)> = self
+            .env
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        env.sort();
+        env
     }
 
     /// Creates the variable `name` with a fixed type and a starting value,
@@ -345,6 +375,7 @@ impl RunContext {
         Self {
             variables: self.variables.clone(),
             variable_types: self.variable_types.clone(),
+            env: self.env.clone(),
             data: Arc::new(RwLock::new(snapshot)),
             item: None,
             engine: self.engine.clone(),
@@ -376,6 +407,30 @@ impl Default for RunContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_env_is_shared_with_children_and_kept_apart_from_other_runs() {
+        let ctx = RunContext::new();
+        ctx.set_env("B_VAR", "2");
+        ctx.set_env("A_VAR", "1");
+        ctx.set_env("A_VAR", "3");
+
+        // Shared by a loop body's context, so a value set inside a loop is
+        // still set after it, as a variable is.
+        let child = ctx.child();
+        child.set_env("C_VAR", "4");
+        assert_eq!(
+            ctx.run_env(),
+            vec![
+                ("A_VAR".to_string(), "3".to_string()),
+                ("B_VAR".to_string(), "2".to_string()),
+                ("C_VAR".to_string(), "4".to_string()),
+            ]
+        );
+
+        // Another run starts with nothing.
+        assert!(RunContext::new().run_env().is_empty());
+    }
 
     #[test]
     fn a_variable_is_read_under_the_variables_key_and_keeps_its_type() {
