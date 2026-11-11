@@ -529,6 +529,15 @@ fn scan_error_row(theme: &gpui_component::Theme, message: impl Into<String>) -> 
         .child(message.into())
 }
 
+/// Whether a Runtimes row is for an ecosystem that was found but has not been
+/// scanned for vulnerabilities, so its row says "not scanned" instead of
+/// showing no vulnerable count. `data` is as `runtime_row` takes it:
+/// `(version, projects, outdated, vulnerable)`, with `vulnerable` `None` until
+/// a scan has finished.
+fn row_not_scanned(data: &Option<(Option<String>, usize, usize, Option<usize>)>) -> bool {
+    matches!(data, Some((Some(_), _, _, None)))
+}
+
 /// A muted one-line notice.
 fn muted_row(theme: &gpui_component::Theme, message: impl Into<String>) -> impl IntoElement {
     div()
@@ -606,7 +615,9 @@ impl DashboardPanel {
                     p.node_version().map(str::to_string),
                     p.detected_projects().len(),
                     p.outdated_count(),
-                    Some(p.vulnerable_count()),
+                    // `None` until the audit has run: "not scanned" must not
+                    // read as zero.
+                    p.vulnerable_findings().map(|findings| findings.len()),
                 )
             }),
         ));
@@ -619,7 +630,9 @@ impl DashboardPanel {
                     p.python_version().map(str::to_string),
                     p.detected_projects().len(),
                     p.outdated_count(),
-                    Some(p.vulnerable_count()),
+                    // Python's scan is on demand, so nothing has been found
+                    // until one has run.
+                    p.vulnerabilities_scanned().then(|| p.vulnerable_count()),
                 )
             }),
         ));
@@ -632,7 +645,7 @@ impl DashboardPanel {
                     p.dotnet_version().map(str::to_string),
                     p.detected_projects().len(),
                     p.outdated_count(),
-                    Some(p.vulnerable_count()),
+                    p.vulnerable_findings().map(|findings| findings.len()),
                 )
             }),
         ));
@@ -668,7 +681,7 @@ impl DashboardPanel {
     ) -> impl IntoElement {
         // A vulnerable count of `None` means the ecosystem has not been
         // scanned, which is shown as such rather than as nothing to report.
-        let not_scanned = matches!(&data, Some((Some(_), _, _, None)));
+        let not_scanned = row_not_scanned(&data);
         let (version, projects, outdated, vulnerable) = match data {
             Some((version, projects, outdated, vulnerable)) => {
                 (version, projects, outdated, vulnerable.unwrap_or(0))
@@ -1238,5 +1251,17 @@ mod tests {
 
         vuln.fixed_in = vec!["2.31.0".to_string(), "3.0.0".to_string()];
         assert_eq!(advisory_label(&vuln), "fixed in 2.31.0");
+    }
+
+    #[test]
+    fn a_found_ecosystem_with_no_scan_yet_is_marked_not_scanned() {
+        let version = Some("22.1.0".to_string());
+        assert!(row_not_scanned(&Some((version.clone(), 2, 0, None))));
+        // A scan that found nothing is a result, not a missing one.
+        assert!(!row_not_scanned(&Some((version.clone(), 2, 0, Some(0)))));
+        assert!(!row_not_scanned(&Some((version, 2, 0, Some(3)))));
+        // Nothing found, or the panel not loaded: there is nothing to scan.
+        assert!(!row_not_scanned(&Some((None, 0, 0, None))));
+        assert!(!row_not_scanned(&None));
     }
 }
