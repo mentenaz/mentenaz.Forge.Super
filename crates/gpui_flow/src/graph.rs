@@ -633,7 +633,9 @@ impl FlowGraph {
                 let canvas_origin = canvas_origin.clone();
                 let viewport = *viewport;
                 move |event, _window, cx| {
-                    let multi = event.modifiers.platform;
+                    // Command on macOS, Control elsewhere: the key that adds to
+                    // a selection. (`platform` is the Windows key on Windows.)
+                    let multi = event.modifiers.secondary(cx);
                     let mouse_pos = event.position;
                     let mouse = window_to_flow(&viewport, canvas_origin.get(), mouse_pos);
 
@@ -1554,6 +1556,9 @@ impl Render for FlowGraph {
                 let canvas_origin_for_left_click = self.canvas_origin.clone();
                 move |event, _window, cx| {
                     let mouse_pos = event.position;
+                    // Whether the key that adds to a selection is held: Command
+                    // on macOS, Control elsewhere.
+                    let keep_selection = event.modifiers.secondary(cx);
                     state_for_mouse_down.update(cx, |state, _| {
                         // If a node drag or connection was already started, skip
                         if state.drag_state.is_some() || state.connecting.is_some() {
@@ -1570,7 +1575,7 @@ impl Render for FlowGraph {
                         let mx = mouse_pos.x.as_f32();
                         let my = mouse_pos.y.as_f32();
                         if let Some(edge_id) = edges::hit_test_edges(state, flow_mouse, 5.0) {
-                            if !event.modifiers.platform {
+                            if !keep_selection {
                                 for n in &mut state.nodes {
                                     n.selected = false;
                                 }
@@ -1586,7 +1591,7 @@ impl Render for FlowGraph {
 
                         // Shift+drag → start box selection
                         if event.modifiers.shift {
-                            if !event.modifiers.platform {
+                            if !keep_selection {
                                 for n in &mut state.nodes {
                                     n.selected = false;
                                 }
@@ -1605,7 +1610,7 @@ impl Render for FlowGraph {
                         }
 
                         // Deselect all nodes and edges
-                        if !event.modifiers.platform {
+                        if !keep_selection {
                             for n in &mut state.nodes {
                                 n.selected = false;
                             }
@@ -1890,22 +1895,21 @@ impl Render for FlowGraph {
                     // (like an Input inside a node) has focus.
                     let graph_focused = focus.is_focused(window);
 
-                    // Undo: Cmd+Z (always allowed)
-                    if key == "z"
-                        && event.keystroke.modifiers.platform
-                        && !event.keystroke.modifiers.shift
-                    {
+                    // The shortcut modifier: Command on macOS, Control on
+                    // Windows and Linux. (`platform` is the Windows key there,
+                    // which is not what anyone presses for undo.)
+                    let shortcut = event.keystroke.modifiers.secondary(cx);
+
+                    // Undo: Cmd+Z / Ctrl+Z (always allowed)
+                    if key == "z" && shortcut && !event.keystroke.modifiers.shift {
                         state_for_key.update(cx, |state, _| {
                             state.undo();
                         });
                         cx.notify(entity_id);
                         return;
                     }
-                    // Redo: Cmd+Shift+Z
-                    if key == "z"
-                        && event.keystroke.modifiers.platform
-                        && event.keystroke.modifiers.shift
-                    {
+                    // Redo: Cmd+Shift+Z / Ctrl+Shift+Z
+                    if key == "z" && shortcut && event.keystroke.modifiers.shift {
                         state_for_key.update(cx, |state, _| {
                             state.redo();
                         });
@@ -1913,8 +1917,8 @@ impl Render for FlowGraph {
                         return;
                     }
 
-                    // Select all: Cmd+A
-                    if key == "a" && event.keystroke.modifiers.platform && graph_focused {
+                    // Select all: Cmd+A / Ctrl+A
+                    if key == "a" && shortcut && graph_focused {
                         state_for_key.update(cx, |state, _| {
                             state.select_all();
                         });

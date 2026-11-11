@@ -58,13 +58,13 @@ Build interactive node graphs, mind maps, workflow editors, and data pipelines i
 - **Edge labels** at midpoints
 - **Pan & zoom** — scroll, drag, pinch-to-zoom with zoom-toward-cursor
 - **Node dragging** — single and multi-select drag with snap-to-grid
-- **Selection** — click, Cmd+click multi-select, Shift+drag box selection, Cmd+A select all
+- **Selection** — click, Cmd/Ctrl+click multi-select, Shift+drag box selection, Cmd/Ctrl+A select all
 - **Connect handles** — drag from source to target with snap-to-handle and visual feedback
 - **Connection validation** — no self-connections, no duplicates, per-handle `is_connectable`
 - **Edge arrowheads** — filled triangles at target endpoints
 - **Handle dots** — visual circles at connection points with hover highlighting
 - **Delete** — Backspace/Delete removes selected nodes and cascades edge removal
-- **Undo/Redo** — Cmd+Z / Cmd+Shift+Z with 100-entry history
+- **Undo/Redo** — Cmd/Ctrl+Z and Cmd/Ctrl+Shift+Z with 100-entry history
 - **Focus management** — child elements (inputs, buttons) properly capture keyboard focus
 - **Minimap** — bird's-eye view with viewport indicator and click-to-pan
 - **Controls panel** — zoom +/-, fit-view buttons
@@ -227,14 +227,14 @@ Controls::new(state).container_size(width, height)
 | Shortcut | Action |
 |---|---|
 | Click | Select node |
-| Cmd + Click | Multi-select |
+| Cmd/Ctrl + Click | Multi-select |
 | Shift + Drag | Box selection |
-| Cmd + A | Select all |
+| Cmd/Ctrl + A | Select all |
 | Delete / Backspace | Remove selected |
-| Cmd + Z | Undo |
-| Cmd + Shift + Z | Redo |
+| Cmd/Ctrl + Z | Undo |
+| Cmd/Ctrl + Shift + Z | Redo |
 | Scroll | Pan |
-| Cmd + Scroll | Zoom |
+| Cmd/Ctrl + Scroll | Zoom |
 | Pinch | Zoom (macOS) |
 
 ## License
