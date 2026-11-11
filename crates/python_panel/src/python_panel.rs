@@ -47,6 +47,7 @@
 mod python_panel_settings;
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -782,8 +783,22 @@ impl PythonPanel {
         });
 
         let command = command.to_string();
+        // A project's packages are in its virtual environment, which a command
+        // started from here does not activate. Run it with the environment's
+        // own `Scripts` (or `bin`) folder first on `PATH`, as activating would,
+        // so `python`, `flask` and `uvicorn` are the project's.
+        let env = (self.interpreter_source == InterpreterSource::Venv)
+            .then(|| {
+                let base =
+                    ide_env::path_env(Some(Path::new(&cwd))).or_else(|| std::env::var_os("PATH"));
+                self.python_exe
+                    .as_deref()
+                    .and_then(|exe| venv_env(exe, base))
+            })
+            .flatten()
+            .unwrap_or_default();
         script_runner.update(cx, |panel, cx| {
-            panel.run_external(command, cwd, cx);
+            panel.run_external_with_env(command, cwd, env, cx);
         });
     }
 
@@ -2496,6 +2511,30 @@ fn update_all_command(
     Ok((!segments.is_empty()).then(|| segments.join(" && ")))
 }
 
+/// The environment that makes a command run as if the virtual environment
+/// whose interpreter is `python_exe` were activated: its `Scripts` (Windows) or
+/// `bin` folder first on `base`, and `VIRTUAL_ENV` naming its root. `None` when
+/// `python_exe` is not inside such a folder, or the path cannot be written.
+fn venv_env(python_exe: &str, base: Option<OsString>) -> Option<Vec<(OsString, OsString)>> {
+    let bin = Path::new(python_exe).parent()?;
+    let root = bin.parent()?;
+    // `Scripts` on Windows, `bin` elsewhere: anything else is not a venv's.
+    if !matches!(
+        bin.file_name()?.to_str()?.to_ascii_lowercase().as_str(),
+        "scripts" | "bin"
+    ) {
+        return None;
+    }
+    let mut dirs = vec![bin.to_path_buf()];
+    if let Some(base) = &base {
+        dirs.extend(std::env::split_paths(base).filter(|dir| dir != bin));
+    }
+    Some(vec![
+        ("PATH".into(), std::env::join_paths(dirs).ok()?),
+        ("VIRTUAL_ENV".into(), root.as_os_str().to_os_string()),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2583,5 +2622,65 @@ mod tests {
             "services/worker/Pipfile"
         ));
         assert!(!manifest_change_is_in_project(cwd, "C:/work", "services/api/pyproject.toml"));
+    }
+
+    fn joined(dirs: &[&str]) -> OsString {
+        std::env::join_paths(dirs).unwrap()
+    }
+
+    #[test]
+    fn a_venv_command_gets_the_environments_scripts_folder_first_and_virtual_env() {
+        let (python, scripts, root) = if cfg!(windows) {
+            (
+                r"C:\proj\.venv\Scripts\python.exe",
+                r"C:\proj\.venv\Scripts",
+                r"C:\proj\.venv",
+            )
+        } else {
+            ("/proj/.venv/bin/python", "/proj/.venv/bin", "/proj/.venv")
+        };
+        let other = if cfg!(windows) {
+            r"C:\tools"
+        } else {
+            "/usr/bin"
+        };
+
+        let env = venv_env(python, Some(joined(&[other]))).unwrap();
+        assert_eq!(env[0], (OsString::from("PATH"), joined(&[scripts, other])));
+        assert_eq!(
+            env[1],
+            (OsString::from("VIRTUAL_ENV"), OsString::from(root))
+        );
+    }
+
+    #[test]
+    fn the_environments_folder_is_not_repeated_on_the_path() {
+        let (python, scripts) = if cfg!(windows) {
+            (
+                r"C:\proj\.venv\Scripts\python.exe",
+                r"C:\proj\.venv\Scripts",
+            )
+        } else {
+            ("/proj/.venv/bin/python", "/proj/.venv/bin")
+        };
+        let other = if cfg!(windows) {
+            r"C:\tools"
+        } else {
+            "/usr/bin"
+        };
+
+        let env = venv_env(python, Some(joined(&[other, scripts]))).unwrap();
+        assert_eq!(env[0].1, joined(&[scripts, other]));
+    }
+
+    #[test]
+    fn an_interpreter_that_is_not_in_a_venv_folder_gets_no_environment() {
+        let python = if cfg!(windows) {
+            r"C:\Python312\python.exe"
+        } else {
+            "/usr/local/python"
+        };
+        assert!(venv_env(python, None).is_none());
+        assert!(venv_env("python", None).is_none());
     }
 }
