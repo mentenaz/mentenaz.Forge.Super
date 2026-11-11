@@ -1460,7 +1460,7 @@ mod tests {
 
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpSocket};
 
     fn action_with_inputs(type_id: &str, inputs: Vec<(&str, Value)>) -> Action {
         let mut action = Action::new(type_id);
@@ -1468,6 +1468,21 @@ mod tests {
             action.inputs.insert(k.to_string(), v);
         }
         action
+    }
+
+    /// A local port that nothing answers on, for a test of "nothing is
+    /// listening". The socket is bound but never listens, and the caller holds
+    /// it for the whole test, so no other test can be given the same port.
+    /// (Binding a listener and dropping it frees the port, and a test that runs
+    /// at the same time can be handed it: that made such a test fail now and
+    /// then when the tests ran in parallel.)
+    fn closed_port() -> (u16, TcpSocket) {
+        let socket = TcpSocket::new_v4().expect("create a socket");
+        socket
+            .bind("127.0.0.1:0".parse().unwrap())
+            .expect("bind a local port");
+        let port = socket.local_addr().expect("read the port").port();
+        (port, socket)
     }
 
     /// Spawns a one-shot raw HTTP mock server on an OS-assigned local port
@@ -1657,11 +1672,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_port_times_out_when_nothing_is_listening() {
-        // A bound-then-immediately-dropped listener frees the port but is
-        // very likely nothing else grabs it in the ~150ms this test runs.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let (port, _held) = closed_port();
 
         let action = action_with_inputs(
             "WaitForPort",
@@ -1757,9 +1768,7 @@ mod tests {
 
     #[tokio::test]
     async fn wait_for_port_timeout_says_which_addresses_it_tried() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        let (port, _held) = closed_port();
 
         let action = action_with_inputs(
             "WaitForPort",

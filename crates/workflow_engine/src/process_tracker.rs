@@ -376,14 +376,23 @@ impl ProcessRegistry {
     /// kill would leave running. It is started as the leader of its own
     /// process group, and the whole group is killed.
     pub fn stop(&self, id: &str) -> Result<(), String> {
-        let mut entries = self.entries.lock().unwrap();
-        let entry = entries
-            .get_mut(id)
-            .ok_or_else(|| format!("no tracked process with id \"{id}\""))?;
+        let not_tracked = || format!("no tracked process with id \"{id}\"");
 
-        if let Some(pid) = entry.info.pid {
+        // Killing the tree starts `taskkill` (or `kill`) and waits for it, which
+        // takes a moment, and the lock is every tracked process's: the output
+        // readers, the exit checks and the other runs all take it. It is not
+        // held while that waits, or a few stops at once would stall them all,
+        // and with them the output a run is waiting to show.
+        let pid = {
+            let entries = self.entries.lock().unwrap();
+            entries.get(id).ok_or_else(not_tracked)?.info.pid
+        };
+        if let Some(pid) = pid {
             kill_process_tree(pid);
         }
+
+        let mut entries = self.entries.lock().unwrap();
+        let entry = entries.get_mut(id).ok_or_else(not_tracked)?;
 
         match entry.child.start_kill() {
             Ok(()) => {
