@@ -23,6 +23,27 @@ pub(super) enum HelmAction {
         head: String,
         base: String,
     },
+    /// A comment on an issue or a pull request's conversation.
+    CommentOn {
+        number: u64,
+        body: String,
+    },
+    /// Closes, reopens or edits a pull request; `changes` holds any of
+    /// `title`, `body` and `state`.
+    UpdatePull {
+        number: u64,
+        changes: serde_json::Value,
+    },
+    /// Merges a pull request. `sha` is the head the user saw, so GitHub
+    /// refuses the merge if the branch moved in the meantime.
+    MergePull {
+        number: u64,
+        method: String,
+        commit_title: String,
+        sha: String,
+        /// The head branch to delete once merged, when asked for.
+        delete_branch: Option<String>,
+    },
     CreateRelease {
         tag_name: String,
         title: String,
@@ -61,6 +82,9 @@ impl HelmAction {
             HelmAction::CreateRepo { .. } => "create repository",
             HelmAction::EditRepo { .. } => "update repository",
             HelmAction::CreatePull { .. } => "create pull request",
+            HelmAction::CommentOn { .. } => "post the comment",
+            HelmAction::UpdatePull { .. } => "update pull request",
+            HelmAction::MergePull { .. } => "merge pull request",
             HelmAction::CreateRelease { .. } => "create release",
             HelmAction::UpdateProfile { .. } => "update profile",
             HelmAction::AcceptRepoInvitation(_) | HelmAction::AcceptOrgInvitation(_) => {
@@ -80,6 +104,9 @@ impl HelmAction {
             self,
             HelmAction::EditRepo { .. }
                 | HelmAction::CreatePull { .. }
+                | HelmAction::CommentOn { .. }
+                | HelmAction::UpdatePull { .. }
+                | HelmAction::MergePull { .. }
                 | HelmAction::CreateRelease { .. }
                 | HelmAction::SetCollaboratorPermission { .. }
                 | HelmAction::RemoveCollaborator(_)
@@ -126,6 +153,49 @@ impl HelmAction {
                 )
                 .await
                 .map(|_| None)
+            }
+            HelmAction::CommentOn { number, body } => {
+                let repo = selected()?;
+                gh_create_issue_comment(repo.owner.login, repo.name, number, body, gh_state)
+                    .await
+                    .map(|_| None)
+            }
+            HelmAction::UpdatePull { number, changes } => {
+                let repo = selected()?;
+                gh_update_pull(repo.owner.login, repo.name, number, changes, gh_state)
+                    .await
+                    .map(|_| None)
+            }
+            HelmAction::MergePull {
+                number,
+                method,
+                commit_title,
+                sha,
+                delete_branch,
+            } => {
+                let repo = selected()?;
+                let merged = gh_merge_pull(
+                    repo.owner.login.clone(),
+                    repo.name.clone(),
+                    number,
+                    method,
+                    (!commit_title.is_empty()).then_some(commit_title),
+                    (!sha.is_empty()).then_some(sha),
+                    gh_state,
+                )
+                .await?;
+                if !merged.merged {
+                    return Err(GhError::Other(merged.message));
+                }
+                // The merge is done, so a branch that cannot be deleted (a
+                // protected one, or one GitHub already removed because the
+                // repository deletes merged branches) is not a failure.
+                if let Some(branch) = delete_branch {
+                    gh_delete_branch(repo.owner.login, repo.name, branch, gh_state)
+                        .await
+                        .ok();
+                }
+                Ok(None)
             }
             HelmAction::CreateRelease {
                 tag_name,
@@ -414,6 +484,24 @@ impl HelmPanel {
                     .retain(|inv| &inv.organization.login != org);
                 self.notify("Invitation declined", cx);
             }
+            HelmAction::CommentOn { .. } => {
+                // The box is cleared by the next render, which has the window.
+                self.clear_comment_input = true;
+            }
+            HelmAction::UpdatePull { changes, .. } => {
+                let closed = changes.get("state").and_then(|state| state.as_str());
+                self.notify(
+                    match closed {
+                        Some("closed") => "Pull request closed",
+                        Some("open") => "Pull request reopened",
+                        _ => "Pull request updated",
+                    },
+                    cx,
+                );
+            }
+            HelmAction::MergePull { number, .. } => {
+                self.notify(format!("Pull request #{number} merged"), cx);
+            }
             HelmAction::CreatePull { .. }
             | HelmAction::CreateRelease { .. }
             | HelmAction::SetCollaboratorPermission { .. }
@@ -429,6 +517,16 @@ impl HelmPanel {
     pub(super) fn action_settled(&mut self, action: &HelmAction, cx: &mut Context<Self>) {
         match action {
             HelmAction::CreatePull { .. } => self.load_pulls(cx),
+            HelmAction::CommentOn { number, .. } => {
+                self.comment_sending = false;
+                self.load_detail_comments(*number, cx);
+            }
+            // Reload the open screen from GitHub, so it shows what GitHub
+            // has (including a merge it refused) and not what was attempted.
+            HelmAction::UpdatePull { number, .. } | HelmAction::MergePull { number, .. } => {
+                self.refresh_pr(*number, false, cx);
+                self.load_pulls(cx);
+            }
             HelmAction::CreateRelease { .. } => self.load_releases(cx),
             HelmAction::SetCollaboratorPermission { .. } | HelmAction::RemoveCollaborator(_) => {
                 self.load_collaborators(cx)

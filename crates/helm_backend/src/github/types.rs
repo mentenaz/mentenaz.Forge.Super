@@ -145,6 +145,14 @@ pub struct Repo {
     pub disabled: bool,
     #[serde(default)]
     pub permissions: Option<RepoPermissions>,
+    /// Which ways of merging a pull request the repository allows. `None`
+    /// when GitHub did not say, which is read as allowed.
+    #[serde(default)]
+    pub allow_merge_commit: Option<bool>,
+    #[serde(default)]
+    pub allow_squash_merge: Option<bool>,
+    #[serde(default)]
+    pub allow_rebase_merge: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -684,6 +692,44 @@ pub struct Pull {
     pub head: PullRef,
     #[serde(default)]
     pub base: PullRef,
+    #[serde(default)]
+    pub draft: bool,
+    /// Whether the pull request merges cleanly. Only a single pull request
+    /// carries it, not the list, and GitHub works it out on request: `None`
+    /// means it has not finished yet.
+    #[serde(default)]
+    pub mergeable: Option<bool>,
+    /// GitHub's verdict on merging: `clean`, `unstable`, `blocked`, `behind`,
+    /// `dirty`, `draft`, `has_hooks` or `unknown`. Single pull request only.
+    #[serde(default)]
+    pub mergeable_state: Option<String>,
+}
+
+/// One check run on a commit, from `/commits/{sha}/check-runs`: what GitHub
+/// Actions and other checks report.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckRun {
+    #[serde(default)]
+    pub id: u64,
+    pub name: String,
+    /// `queued`, `in_progress` or `completed`.
+    #[serde(default)]
+    pub status: String,
+    /// Set once `status` is `completed`: `success`, `failure`, `neutral`,
+    /// `cancelled`, `skipped`, `timed_out` or `action_required`.
+    #[serde(default)]
+    pub conclusion: Option<String>,
+    #[serde(default)]
+    pub html_url: Option<String>,
+}
+
+/// GitHub's answer to merging a pull request.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MergeResult {
+    #[serde(default)]
+    pub merged: bool,
+    #[serde(default)]
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

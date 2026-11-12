@@ -4,6 +4,11 @@
 
 use super::*;
 
+/// How often the open issue or pull request is checked for news.
+const DETAIL_POLL: Duration = Duration::from_secs(30);
+/// The same while a pull request's checks are still running.
+const DETAIL_POLL_CHECKS_RUNNING: Duration = Duration::from_secs(15);
+
 impl HelmPanel {
     /// Loads `self.selected_repo`'s issue list for the current
     /// `issues_filter`. The Issues tab drops PR-shaped items (the `/issues`
@@ -46,7 +51,59 @@ impl HelmPanel {
         let number = issue.number;
         self.selected_issue = Some(issue);
         self.navigate_to(HelmScreen::IssueDetail, cx);
+        self.reset_comment_box();
         self.load_detail_comments(number, cx);
+    }
+
+    /// Starts the new-comment box empty for the item just opened. A draft
+    /// written for the previous item is not carried over to this one.
+    pub(super) fn reset_comment_box(&mut self) {
+        self.comment_sending = false;
+        self.clear_comment_input = true;
+    }
+
+    /// The number of the issue or pull request on screen.
+    fn open_item_number(&self) -> Option<u64> {
+        match self.screen {
+            HelmScreen::IssueDetail => self.selected_issue.as_ref().map(|issue| issue.number),
+            HelmScreen::PrDetail => self.selected_pr.as_ref().map(|pr| pr.number),
+            _ => None,
+        }
+    }
+
+    /// Posts what is in the comment box on the open issue or pull request.
+    /// The box is emptied once GitHub has accepted it, so a comment that
+    /// failed to send is still there to try again.
+    pub(super) fn post_comment(&mut self, cx: &mut Context<Self>) {
+        let body = self.comment_input.read(cx).value().trim().to_string();
+        let Some(number) = self.open_item_number() else {
+            return;
+        };
+        if body.is_empty() || self.comment_sending {
+            return;
+        }
+        self.comment_sending = true;
+        self.run_action(HelmAction::CommentOn { number, body }, true, cx);
+        cx.notify();
+    }
+
+    /// The box under the thread for writing a comment.
+    pub(super) fn render_comment_box(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let empty = self.comment_input.read(cx).value().trim().is_empty();
+        v_flex()
+            .gap_2()
+            .p_3()
+            .child(Textarea::new(&self.comment_input))
+            .child(
+                h_flex().justify_end().child(
+                    Button::new("helm-comment-send")
+                        .primary()
+                        .xsmall()
+                        .label(if self.comment_sending { "Sending…" } else { "Comment" })
+                        .disabled(empty || self.comment_sending)
+                        .on_click(cx.listener(|this, _, _, cx| this.post_comment(cx))),
+                ),
+            )
     }
 
     /// Loads the comment thread for whichever issue/PR is now open —
@@ -54,12 +111,29 @@ impl HelmPanel {
     /// from the same `/issues/{number}/comments` endpoint (see `Comment`'s
     /// doc comment).
     pub(super) fn load_detail_comments(&mut self, number: u64, cx: &mut Context<Self>) {
-        let Some(repo) = self.selected_repo.clone() else {
+        if self.selected_repo.is_none() {
             return;
-        };
+        }
         self.detail_comments_state = LoadState::Loading;
         self.detail_comments.clear();
         cx.notify();
+        self.fetch_detail_comments(number, false, cx);
+    }
+
+    /// Asks GitHub for the thread again and swaps it in when it arrives,
+    /// leaving the comments already on screen until then. This is what
+    /// Refresh does, so the thread does not blink away and come back.
+    /// `quiet` is for the background check: a failure then leaves the screen
+    /// as it is instead of replacing the thread with an error.
+    pub(super) fn fetch_detail_comments(
+        &mut self,
+        number: u64,
+        quiet: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(repo) = self.selected_repo.clone() else {
+            return;
+        };
         let gh_state = self.gh_state.clone();
         let started = gh_state.clone();
         cx.spawn(async move |this, cx| {
@@ -68,7 +142,9 @@ impl HelmPanel {
             })
             .await;
             this.update(cx, |this, cx| {
-                if !this.is_current_state(&started) {
+                // A late answer for an item the user has since left would
+                // otherwise replace the thread of the one now open.
+                if !this.is_current_state(&started) || this.open_item_number() != Some(number) {
                     return;
                 }
                 match result {
@@ -76,6 +152,7 @@ impl HelmPanel {
                         this.detail_comments = comments;
                         this.detail_comments_state = LoadState::Idle;
                     }
+                    Err(_) if quiet => {}
                     Err(e) => {
                         this.detail_comments_state = LoadState::Error;
                         this.error_msg = e.to_string();
@@ -87,6 +164,66 @@ impl HelmPanel {
             .ok();
         })
         .detach();
+    }
+
+    /// Keeps the background check running for the issue or pull request on
+    /// screen, and for no other: starts it on arriving at one, drops it on
+    /// leaving. Called whenever the screen changes.
+    pub(super) fn sync_detail_poll(&mut self, cx: &mut Context<Self>) {
+        let running = self.detail_poll.as_ref().map(|(number, _)| *number);
+        match self.open_item_number() {
+            Some(number) if running == Some(number) => {}
+            Some(number) => self.start_detail_poll(number, cx),
+            None => self.detail_poll = None,
+        }
+    }
+
+    /// How long to wait before the next background check: sooner while a pull
+    /// request's checks are still running, since that is what is being
+    /// watched.
+    fn detail_poll_interval(&self) -> Duration {
+        let checks_running = self.screen == HelmScreen::PrDetail
+            && self.pr_checks.iter().any(|run| run.status != "completed");
+        if checks_running {
+            DETAIL_POLL_CHECKS_RUNNING
+        } else {
+            DETAIL_POLL
+        }
+    }
+
+    /// Checks the open item for news every so often, so a reply or a finished
+    /// check shows up without pressing Refresh. It uses the same conditional
+    /// requests as everything else, which GitHub answers with "unchanged" at no
+    /// cost to the rate limit, and it is silent when it fails. Replacing
+    /// `detail_poll` drops the previous loop, which ends it.
+    fn start_detail_poll(&mut self, number: u64, cx: &mut Context<Self>) {
+        let started = self.gh_state.clone();
+        let task = cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(wait) = this.update(cx, |this, _| this.detail_poll_interval()) else {
+                    return;
+                };
+                cx.background_executor().timer(wait).await;
+                let keep_going = this
+                    .update(cx, |this, cx| {
+                        if !this.is_current_state(&started)
+                            || this.open_item_number() != Some(number)
+                        {
+                            return false;
+                        }
+                        this.fetch_detail_comments(number, true, cx);
+                        if this.screen == HelmScreen::PrDetail {
+                            this.refresh_pr(number, true, cx);
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    return;
+                }
+            }
+        });
+        self.detail_poll = Some((number, task));
     }
 
     /// The Open / Closed / All switch of the Issues and Pulls screens.
@@ -194,6 +331,7 @@ impl HelmPanel {
             .map(|u| u.login.clone())
             .unwrap_or_default();
         let url = issue.html_url.clone();
+        let number = issue.number;
 
         v_flex()
             .child(
@@ -226,12 +364,25 @@ impl HelmPanel {
                                     ),
                             )
                             .child(
-                                Button::new("helm-issue-open-browser")
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::ExternalLink)
-                                    .tooltip("Open in Browser")
-                                    .on_click(move |_, _, cx| cx.open_url(&url)),
+                                h_flex()
+                                    .gap_1()
+                                    .child(
+                                        Button::new("helm-issue-refresh")
+                                            .ghost()
+                                            .xsmall()
+                                            .label("Refresh")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.fetch_detail_comments(number, false, cx)
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("helm-issue-open-browser")
+                                            .ghost()
+                                            .xsmall()
+                                            .icon(IconName::ExternalLink)
+                                            .tooltip("Open in Browser")
+                                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                                    ),
                             ),
                     )
                     .child(
@@ -261,6 +412,7 @@ impl HelmPanel {
             )
             .child(Separator::horizontal())
             .child(self.render_comment_thread(cx))
+            .child(self.render_comment_box(cx))
             .into_any_element()
     }
 

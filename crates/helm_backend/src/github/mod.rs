@@ -31,8 +31,9 @@ pub use api::{
 };
 pub use api::{
     gh_accept_org_invitation, gh_accept_repo_invitation, gh_add_collaborator, gh_create_pull,
-    gh_create_release, gh_create_repo, gh_decline_org_invitation, gh_decline_repo_invitation,
-    gh_get_branches, gh_get_collaborators, gh_get_combined_status, gh_get_current_user,
+    gh_create_issue_comment, gh_create_release, gh_create_repo, gh_decline_org_invitation,
+    gh_decline_repo_invitation, gh_delete_branch, gh_get_pull, gh_list_check_runs, gh_merge_pull,
+    gh_update_pull, gh_get_branches, gh_get_collaborators, gh_get_combined_status, gh_get_current_user,
     gh_get_org_detail, gh_get_org_logins, gh_get_org_role, gh_get_repo, gh_get_repo_invitations,
     gh_get_repos, gh_get_traffic_clones, gh_get_traffic_paths, gh_get_traffic_referrers,
     gh_get_traffic_views, gh_get_user, gh_get_verified_emails, gh_get_workflow_run,
@@ -59,10 +60,10 @@ pub use paging::{Page, PageLinks, interpret_page, interpret_page_under, last_pag
 pub use remote::{GitHubRemote, parse_github_remote};
 
 pub use types::{
-    BlobData, BlobKind, Branch, CloneEvent, Collaborator, CombinedCommitStatus, Comment,
+    BlobData, BlobKind, Branch, CheckRun, CloneEvent, Collaborator, CombinedCommitStatus, Comment,
     CommitDetail, CommitFile, CommitSummary, CompareFile, CompareResult, Deployment,
     FileClassification, GhState, GitHubUser, GitHubUserDetail, Issue, MAX_CONCURRENT_REQUESTS,
-    MAX_INLINE_IMAGE_BYTES, MAX_INLINE_TEXT_BYTES, OrgDetail, OrgInvitation, OrgMember, Package,
+    MAX_INLINE_IMAGE_BYTES, MAX_INLINE_TEXT_BYTES, MergeResult, OrgDetail, OrgInvitation, OrgMember, Package,
     PackageVersion, Pull, Readme, RefMovement, Release, Repo, RepoInvitation, RepoPermission,
     RepoPermissions, RepoRef, RepoTraffic, RepoTree, ResolvedRef, SearchCodeMatch,
     SearchCodeMatchFragment, SearchRepoResult, Tag, TreeEntry, TreeEntryKind, TreeLoadResult,

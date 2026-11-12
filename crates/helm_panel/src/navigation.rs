@@ -96,6 +96,8 @@ impl HelmPanel {
         if matches!(screen, HelmScreen::Profile | HelmScreen::Invitations) {
             self.load_repo_invitations(cx);
         }
+        // The background check follows the issue or pull request on screen.
+        self.sync_detail_poll(cx);
         cx.notify();
     }
 

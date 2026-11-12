@@ -16,9 +16,10 @@ use super::error::{GhError, RawResponse, interpret, interpret_empty, unix_now};
 use super::paging::{Page, interpret_page, interpret_page_under};
 use super::requests::{self, ApiRequest, ApiResponseFormat};
 use super::types::{
-    BlobData, BlobKind, Branch, Collaborator, CombinedCommitStatus, Comment, CommitDetail,
-    CommitFile, CommitSummary, CompareFile, CompareResult, Deployment, GhState, GitHubUser,
-    GitHubUserDetail, Issue, OrgDetail, OrgInvitation, Package, PackageVersion, Pull, Readme,
+    BlobData, BlobKind, Branch, CheckRun, Collaborator, CombinedCommitStatus, Comment,
+    CommitDetail, CommitFile, CommitSummary, CompareFile, CompareResult, Deployment, GhState,
+    GitHubUser, GitHubUserDetail, Issue, MergeResult, OrgDetail, OrgInvitation, Package,
+    PackageVersion, Pull, Readme,
     RefMovement, Release, Repo, RepoInvitation, RepoTree, ResolvedRef, SearchCodeMatch,
     SearchRepoResult, Tag, TrafficClones, TrafficPath, TrafficReferrer, TrafficViews, TreeEntry,
     TreeEntryKind, TreeLoadResult, WorkflowJob, WorkflowRun, classify_file, classify_ref_movement,
@@ -1193,6 +1194,92 @@ pub async fn gh_create_pull(
         requests::create_pull(&owner, &repo, &head, &base, &title, body.as_deref()),
     )
     .await
+}
+
+/// One pull request on its own: unlike the list, it says whether it can be
+/// merged (`mergeable_state`). GitHub works that out when first asked, so
+/// `mergeable` can come back `None`; ask again shortly after.
+pub async fn gh_get_pull(
+    owner: String,
+    repo: String,
+    number: u64,
+    state: &GhState,
+) -> Result<Pull, GhError> {
+    fetch(state, requests::pull(&owner, &repo, number)).await
+}
+
+/// Closes, reopens or edits a pull request. See [`requests::update_pull`]
+/// for what `changes` may hold.
+pub async fn gh_update_pull(
+    owner: String,
+    repo: String,
+    number: u64,
+    changes: serde_json::Value,
+    state: &GhState,
+) -> Result<Pull, GhError> {
+    fetch(state, requests::update_pull(&owner, &repo, number, changes)).await
+}
+
+/// Posts a comment on an issue or a pull request.
+pub async fn gh_create_issue_comment(
+    owner: String,
+    repo: String,
+    number: u64,
+    body: String,
+    state: &GhState,
+) -> Result<Comment, GhError> {
+    fetch(
+        state,
+        requests::create_issue_comment(&owner, &repo, number, &body),
+    )
+    .await
+}
+
+/// The checks that ran on `ref_name` (a commit SHA).
+pub async fn gh_list_check_runs(
+    owner: String,
+    repo: String,
+    ref_name: String,
+    state: &GhState,
+) -> Result<Vec<CheckRun>, GhError> {
+    let answer: serde_json::Value =
+        fetch(state, requests::check_runs(&owner, &repo, &ref_name)).await?;
+    Ok(list_under(&answer, "check_runs"))
+}
+
+/// Merges a pull request. See [`requests::merge_pull`]. GitHub answers 405
+/// when the pull request cannot be merged and 409 when `sha` is no longer the
+/// head; both come back as errors that carry GitHub's own message.
+pub async fn gh_merge_pull(
+    owner: String,
+    repo: String,
+    number: u64,
+    method: String,
+    commit_title: Option<String>,
+    sha: Option<String>,
+    state: &GhState,
+) -> Result<MergeResult, GhError> {
+    fetch(
+        state,
+        requests::merge_pull(
+            &owner,
+            &repo,
+            number,
+            &method,
+            commit_title.as_deref(),
+            sha.as_deref(),
+        ),
+    )
+    .await
+}
+
+pub async fn gh_delete_branch(
+    owner: String,
+    repo: String,
+    branch: String,
+    state: &GhState,
+) -> Result<(), GhError> {
+    perform(state, requests::delete_branch(&owner, &repo, &branch)).await
 }
 
 pub async fn gh_create_release(

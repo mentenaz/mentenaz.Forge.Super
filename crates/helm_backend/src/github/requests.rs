@@ -425,6 +425,76 @@ pub fn create_pull(
     )
 }
 
+/// One pull request on its own, which (unlike the list) says whether it can
+/// be merged.
+pub fn pull(owner: &str, name: &str, number: u64) -> ApiRequest {
+    get(repo_path(owner, name, &format!("/pulls/{number}")))
+}
+
+/// Closes, reopens or edits a pull request: `changes` holds any of `title`,
+/// `body`, `state` (`open` or `closed`) and `base`.
+pub fn update_pull(owner: &str, name: &str, number: u64, changes: Value) -> ApiRequest {
+    with_body(
+        "PATCH",
+        repo_path(owner, name, &format!("/pulls/{number}")),
+        changes,
+    )
+}
+
+/// Posts a comment on an issue or a pull request's conversation.
+pub fn create_issue_comment(owner: &str, name: &str, number: u64, body: &str) -> ApiRequest {
+    with_body(
+        "POST",
+        repo_path(owner, name, &format!("/issues/{number}/comments")),
+        json!({ "body": body }),
+    )
+}
+
+/// The checks that ran on a commit. A single page of up to 100 is enough
+/// for the pull request screen.
+pub fn check_runs(owner: &str, name: &str, ref_name: &str) -> ApiRequest {
+    get(repo_path(
+        owner,
+        name,
+        &format!("/commits/{}/check-runs?per_page=100", seg(ref_name)),
+    ))
+}
+
+/// Merges a pull request. `method` is `merge`, `squash` or `rebase`.
+/// `sha` is the head the user saw: GitHub refuses the merge if the branch
+/// has moved since, so nothing is merged that was not on screen. A rebase
+/// merge has no commit message, so the title is left out for it.
+pub fn merge_pull(
+    owner: &str,
+    name: &str,
+    number: u64,
+    method: &str,
+    commit_title: Option<&str>,
+    sha: Option<&str>,
+) -> ApiRequest {
+    let mut body = json!({ "merge_method": method });
+    if method != "rebase"
+        && let Some(title) = commit_title.filter(|title| !title.is_empty())
+    {
+        body["commit_title"] = json!(title);
+    }
+    if let Some(sha) = sha.filter(|sha| !sha.is_empty()) {
+        body["sha"] = json!(sha);
+    }
+    with_body(
+        "PUT",
+        repo_path(owner, name, &format!("/pulls/{number}/merge")),
+        body,
+    )
+}
+
+/// Deletes a branch. Its slashes stay slashes, because the ref is part of
+/// the path.
+pub fn delete_branch(owner: &str, name: &str, branch: &str) -> ApiRequest {
+    let branch = branch.split('/').map(seg).collect::<Vec<_>>().join("/");
+    delete(repo_path(owner, name, &format!("/git/refs/heads/{branch}")))
+}
+
 pub fn collaborators(owner: &str, name: &str) -> ApiRequest {
     get(repo_path(owner, name, "/collaborators?per_page=100"))
 }
@@ -750,6 +820,55 @@ mod tests {
         let remove = remove_collaborator("o", "r", "octocat");
         assert_eq!(line(&remove), "DELETE /repos/o/r/collaborators/octocat");
         assert_eq!(remove.body, None);
+    }
+
+    #[test]
+    fn pull_request_actions() {
+        assert_eq!(line(&pull("o", "r", 7)), "GET /repos/o/r/pulls/7");
+        assert_eq!(
+            line(&check_runs("o", "r", "abc123")),
+            "GET /repos/o/r/commits/abc123/check-runs?per_page=100"
+        );
+
+        let close = update_pull("o", "r", 7, json!({ "state": "closed" }));
+        assert_eq!(line(&close), "PATCH /repos/o/r/pulls/7");
+        assert_eq!(close.body, Some(json!({ "state": "closed" })));
+
+        let comment = create_issue_comment("o", "r", 7, "Looks good");
+        assert_eq!(line(&comment), "POST /repos/o/r/issues/7/comments");
+        assert_eq!(comment.body, Some(json!({ "body": "Looks good" })));
+    }
+
+    #[test]
+    fn a_merge_names_the_method_and_the_head_that_was_shown() {
+        let squash = merge_pull("o", "r", 7, "squash", Some("Add it (#7)"), Some("abc123"));
+        assert_eq!(line(&squash), "PUT /repos/o/r/pulls/7/merge");
+        assert_eq!(
+            squash.body,
+            Some(json!({
+                "merge_method": "squash",
+                "commit_title": "Add it (#7)",
+                "sha": "abc123",
+            }))
+        );
+
+        // A rebase has no commit message, so a title is not sent with it.
+        let rebase = merge_pull("o", "r", 7, "rebase", Some("ignored"), None);
+        assert_eq!(rebase.body, Some(json!({ "merge_method": "rebase" })));
+
+        // An empty title leaves the default one to GitHub.
+        let merge = merge_pull("o", "r", 7, "merge", Some(""), Some(""));
+        assert_eq!(merge.body, Some(json!({ "merge_method": "merge" })));
+    }
+
+    #[test]
+    fn deleting_a_branch_keeps_its_slashes_in_the_path() {
+        let request = delete_branch("o", "r", "feature/a b");
+        assert_eq!(
+            line(&request),
+            "DELETE /repos/o/r/git/refs/heads/feature/a%20b"
+        );
+        assert_eq!(request.body, None);
     }
 
     #[test]

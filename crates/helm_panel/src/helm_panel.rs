@@ -51,7 +51,7 @@ use gpui_component::{
     form::{field, v_form},
     group_box::GroupBox,
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     link::Link,
     list::ListItem,
     menu::{DropdownMenu as _, PopupMenuItem},
@@ -72,15 +72,16 @@ use changes::*;
 use collaborators::*;
 pub use commit_identity::CommitIdentity;
 use helm_backend::github::{
-    Branch, CloneCanceller, CloneEvent, CloneFailure, Collaborator, Comment, CommitSummary,
-    Deployment, DeviceFlow, ErrorLink, GhCliAccount, GhCliSignInCanceller, GhCliSignInFailure,
+    Branch, CheckRun, CloneCanceller, CloneEvent, CloneFailure, Collaborator, Comment,
+    CommitSummary, Deployment, DeviceFlow, ErrorLink, GhCliAccount, GhCliSignInCanceller, GhCliSignInFailure,
     GhError, GhState, GitHubUser, GitHubUserDetail, HELM_OAUTH_CLIENT_ID, HELM_OAUTH_SCOPES, Issue,
     OrgDetail, OrgInvitation, OrgMember, Package, PackageVersion, Page, PollOutcome, Pull, Release,
     Repo, RepoInvitation, RepoTraffic, Tag, WorkflowJob, WorkflowRun, clone_canceller, clone_repo,
     fetch_page, fetch_page_under, gh_accept_org_invitation, gh_accept_repo_invitation,
     gh_add_collaborator, gh_cli_accounts, gh_cli_sign_in, gh_cli_sign_in_canceller, gh_cli_token,
-    gh_create_pull, gh_create_release, gh_create_repo, gh_decline_org_invitation,
-    gh_decline_repo_invitation, gh_get_current_user, gh_get_org_detail, gh_get_org_logins,
+    gh_create_issue_comment, gh_create_pull, gh_create_release, gh_create_repo,
+    gh_decline_org_invitation, gh_decline_repo_invitation, gh_delete_branch, gh_get_current_user,
+    gh_get_pull, gh_list_check_runs, gh_merge_pull, gh_update_pull, gh_get_org_detail, gh_get_org_logins,
     gh_get_org_role, gh_get_repo_invitations, gh_get_repos, gh_get_traffic_clones,
     gh_get_traffic_paths, gh_get_traffic_referrers, gh_get_traffic_views, gh_get_user,
     gh_get_workflow_run, gh_get_workflow_run_jobs, gh_list_dependabot_alerts,
@@ -93,6 +94,7 @@ use helm_backend::{EventRecvError, on_tokio};
 pub use helm_panel_settings::{HelmAccount, HelmAccountSource, HelmPanelSettings};
 use helm_ui::*;
 pub use repo_access::RepoAccess;
+use pulls::*;
 use repository_modal::*;
 use settings::{DockSide, Settings as _};
 use state::*;
@@ -393,6 +395,18 @@ pub struct HelmPanel {
     /// `Comment`'s doc comment).
     detail_comments: Vec<Comment>,
     detail_comments_state: LoadState,
+    /// The new-comment box under the thread, shared by both detail screens.
+    comment_input: Entity<TextareaState>,
+    /// A comment is on its way, so the button does not send it twice.
+    comment_sending: bool,
+    /// The box is emptied by the next render, which has the window.
+    clear_comment_input: bool,
+    /// The background check of the open issue or pull request, with the number
+    /// it is for; see [`Self::sync_detail_poll`].
+    detail_poll: Option<(u64, Task<()>)>,
+    /// The open pull request's checks, loaded by [`Self::refresh_pr`].
+    pr_checks: Vec<CheckRun>,
+    pr_checks_state: LoadState,
     releases: Section<Release>,
     releases_list: ListView,
     packages: Section<Package>,
@@ -573,6 +587,16 @@ impl HelmPanel {
                 selected_pr: None,
                 detail_comments: Vec::new(),
                 detail_comments_state: LoadState::Idle,
+                comment_input: cx.new(|cx| {
+                    TextareaState::new(window, cx)
+                        .auto_grow(2, 8)
+                        .placeholder("Leave a comment")
+                }),
+                comment_sending: false,
+                clear_comment_input: false,
+                detail_poll: None,
+                pr_checks: Vec::new(),
+                pr_checks_state: LoadState::Idle,
                 releases: Section::default(),
                 releases_list: lists::releases_list(window, cx),
                 packages: Section::default(),
@@ -764,7 +788,11 @@ impl Panel for HelmPanel {
 }
 
 impl Render for HelmPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.clear_comment_input) {
+            self.comment_input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
         let show_nav = !matches!(self.screen, HelmScreen::Auth);
         if self.screen == HelmScreen::RepoList {
             let query = self.repo_search.read(cx).value().to_string();

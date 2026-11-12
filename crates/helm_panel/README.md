@@ -100,8 +100,8 @@ Inside a repository:
 | --- | --- |
 | Branches | Branch list |
 | Collaborators | Add or remove collaborators |
-| Issues | Issue list and detail with comments |
-| Pull requests | List, detail and create |
+| Issues | Issue list and detail with comments, and a box to post a comment |
+| Pull requests | List, detail, create, edit, close and reopen, merge, post a comment; the detail shows its checks and whether it can be merged |
 | Releases | List and create |
 | Packages | Packages; opening one shows its versions above the list |
 | Commits | Recent commits |
@@ -127,6 +127,47 @@ when the switch was actually changed, so saving other edits never touches it.
 Making a repository public exposes its code and history to everyone, and
 GitHub may refuse the change depending on organisation policy or your plan.
 A refusal is handled as described below.
+
+### Pull requests
+
+Opening a pull request fetches it on its own, because the list does not say
+whether it merged or can be merged, and then loads the checks that ran on its
+head commit.
+
+- **Merge status.** GitHub's own verdict (`mergeable_state`) is shown as it is:
+  ready, ready with a caution (checks that are not required are failing), or
+  blocked (conflicts, a branch behind its base, a required review or check
+  missing, a draft). While GitHub has not worked it out the line says so, and
+  Helm asks again every two seconds, up to four times. **Refresh** asks again.
+  Helm does not try to work out branch protection itself.
+- **Checks.** The check runs of the head commit (GitHub Actions and other
+  checks), each with its result and a link to its page. Legacy commit
+  statuses are not shown.
+- **Edit** changes the title and description. **Close** and **Reopen** change
+  the state, and a merged pull request has neither.
+- **Merge** is enabled only when GitHub says the pull request can be merged.
+  A dialog names the pull request and its target branch and asks for the
+  method (only those the repository allows, when it says), the commit title
+  (not for a rebase) and whether to delete the head branch. The branch is only
+  offered when it lives in the repository itself and is not its default
+  branch. The merge is sent with the head commit the user saw, so GitHub
+  refuses it if the branch moved in the meantime. A branch that cannot be
+  deleted afterwards is not reported as a failure, because the merge itself
+  succeeded.
+- **Comments** on pull requests and issues are posted from the box under the
+  thread. The box is emptied once GitHub has accepted the comment, so one that
+  failed is still there to send again.
+
+- **Staying current.** While an issue or pull request is open, Helm checks it
+  for news every 30 seconds (every 15 while a pull request's checks are still
+  running): new comments, the merge status and the checks. The check stops
+  when you leave the item. It uses the same conditional requests as the rest
+  of Helm, which GitHub answers with "unchanged" at no cost to the rate limit,
+  and it is silent when it fails. **Refresh** does the same at once, and the
+  comment box is never touched by either.
+
+Marking a draft ready for review, reviews, and the changed files are not
+done; use GitHub for those.
 
 ### Scopes Helm asks for
 

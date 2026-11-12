@@ -24,6 +24,15 @@ pub(super) enum HelmModalKind {
     RemoveCollaborator(String),
     /// Carries the repo's default branch, prefilled as the base.
     CreatePull(String),
+    /// Edits the open pull request's title and body, prefilled.
+    EditPull {
+        number: u64,
+        title: String,
+        body: String,
+    },
+    /// Confirms merging a pull request: the method, the commit title and
+    /// whether to delete the branch.
+    MergePull(MergePlan),
     CreateRelease,
     /// Carries the signed-in user's current profile, prefilled into the form.
     EditProfile(GitHubUser),
@@ -52,6 +61,8 @@ pub(super) struct HelmRepositoryModal {
     pub(super) focus_handle: FocusHandle,
     pub(super) name: Entity<InputState>,
     pub(super) description: Entity<InputState>,
+    /// The Edit pull request dialog's multi-line description.
+    pub(super) body: Entity<TextareaState>,
     pub(super) homepage: Entity<InputState>,
     pub(super) topics: Entity<InputState>,
     pub(super) organization: Entity<InputState>,
@@ -84,6 +95,10 @@ pub(super) struct HelmRepositoryModal {
     pub(super) draft: bool,
     pub(super) prerelease: bool,
     pub(super) permission: usize,
+    /// The merge dialog's chosen method, as an index into its plan's methods.
+    pub(super) merge_method: usize,
+    /// Whether the merge dialog also deletes the head branch.
+    pub(super) delete_branch: bool,
 }
 
 impl HelmRepositoryModal {
@@ -114,7 +129,23 @@ impl HelmRepositoryModal {
             HelmModalKind::CommitIdentity { name, email, .. } => {
                 (name.clone(), String::new(), email.clone(), String::new())
             }
+            HelmModalKind::EditPull { title, .. } => {
+                (title.clone(), String::new(), String::new(), String::new())
+            }
+            // GitHub's own default for a squash or merge commit's title.
+            HelmModalKind::MergePull(plan) => (
+                format!("{} (#{})", plan.title, plan.number),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
             _ => (String::new(), String::new(), String::new(), String::new()),
+        };
+        // A pull request's description runs to several lines, so it has a
+        // text area of its own rather than the single-line `description`.
+        let body_value = match &kind {
+            HelmModalKind::EditPull { body, .. } => body.clone(),
+            _ => String::new(),
         };
         let (has_issues, has_wiki, has_projects, has_discussions) = match &kind {
             HelmModalKind::EditRepo(repo) => (
@@ -195,6 +226,11 @@ impl HelmRepositoryModal {
             focus_handle: cx.focus_handle(),
             name: cx.new(|cx| InputState::new(window, cx).default_value(name_value)),
             description: cx.new(|cx| InputState::new(window, cx).default_value(description_value)),
+            body: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(4, 12)
+                    .default_value(body_value)
+            }),
             homepage: cx.new(|cx| InputState::new(window, cx).default_value(homepage_value)),
             topics: cx.new(|cx| {
                 InputState::new(window, cx)
@@ -223,6 +259,8 @@ impl HelmRepositoryModal {
             draft: false,
             prerelease: false,
             permission: 0,
+            merge_method: 0,
+            delete_branch: false,
         }
     }
 
@@ -233,6 +271,8 @@ impl HelmRepositoryModal {
             HelmModalKind::AddCollaborator => "Add collaborator",
             HelmModalKind::RemoveCollaborator(_) => "Remove collaborator?",
             HelmModalKind::CreatePull(_) => "Create pull request",
+            HelmModalKind::EditPull { .. } => "Edit pull request",
+            HelmModalKind::MergePull(_) => "Merge pull request?",
             HelmModalKind::CreateRelease => "Create release",
             HelmModalKind::EditProfile(_) => "Edit profile",
             HelmModalKind::CommitIdentity { .. } => "Commit name and email",
@@ -432,6 +472,53 @@ impl Render for HelmRepositoryModal {
                 .child(field().label("Head branch").child(Input::new(&self.head_branch)))
                 .child(field().label("Base branch").child(Input::new(&self.base_branch)))
                 .into_any_element(),
+            HelmModalKind::EditPull { .. } => v_form()
+                .child(field().label("Title").child(Input::new(&self.name)))
+                .child(field().label("Description").child(Textarea::new(&self.body)))
+                .into_any_element(),
+            HelmModalKind::MergePull(plan) => {
+                let (method, method_label) = plan.methods[self.merge_method.min(plan.methods.len() - 1)];
+                v_form()
+                    .child(field().child(div().text_sm().text_color(foreground).child(format!(
+                        "Merge pull request #{} into {}? A merge cannot be undone from here.",
+                        plan.number, plan.base
+                    ))))
+                    .children(plan.caution.map(|caution| {
+                        field().child(Alert::warning("helm-merge-caution", caution))
+                    }))
+                    .child(
+                        field().label("Method").child(
+                            Button::new("helm-merge-method")
+                                .outline()
+                                .label(method_label)
+                                .disabled(plan.methods.len() < 2)
+                                .on_click(cx.listener({
+                                    let count = plan.methods.len();
+                                    move |this, _, _, cx| {
+                                        this.merge_method = (this.merge_method + 1) % count;
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
+                    )
+                    // A rebase replays the commits as they are, so there is
+                    // no message to write.
+                    .when(method != "rebase", |form| {
+                        form.child(field().label("Commit title").child(Input::new(&self.name)))
+                    })
+                    .children(plan.deletable_branch.clone().map(|branch| {
+                        field().child(
+                            Switch::new("helm-merge-delete-branch")
+                                .label(format!("Delete the branch {branch} afterwards"))
+                                .checked(self.delete_branch)
+                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    this.delete_branch = *checked;
+                                    cx.notify();
+                                })),
+                        )
+                    }))
+                    .into_any_element()
+            }
             HelmModalKind::CreateRelease => v_form()
                 .child(field().label("Tag").child(Input::new(&self.tag_name)))
                 .child(field().label("Title").child(Input::new(&self.name)))
@@ -636,6 +723,7 @@ impl Render for HelmRepositoryModal {
             let kind = kind.clone();
             let name = this.name.read(cx).value().to_string();
             let description = this.description.read(cx).value().to_string();
+            let body = this.body.read(cx).value().to_string();
             let homepage = this.homepage.read(cx).value().to_string();
             let topics = this
                 .topics
@@ -660,6 +748,8 @@ impl Render for HelmRepositoryModal {
             let location = this.location.read(cx).value().to_string();
             let draft = this.draft;
             let prerelease = this.prerelease;
+            let merge_method = this.merge_method;
+            let delete_branch = this.delete_branch;
             let gitignore = this.gitignore;
             let readme = this.readme;
             let commit_message = this.commit_message.read(cx).value().trim().to_string();
@@ -726,6 +816,20 @@ impl Render for HelmRepositoryModal {
                             window,
                             cx,
                         );
+                    });
+                }
+                HelmModalKind::EditPull { number, .. } => {
+                    if name.trim().is_empty() {
+                        return;
+                    }
+                    parent.update(cx, |this, cx| {
+                        this.handle_edit_pull(number, name.trim().to_string(), body, cx);
+                    });
+                }
+                HelmModalKind::MergePull(plan) => {
+                    let (method, _) = plan.methods[merge_method.min(plan.methods.len() - 1)];
+                    parent.update(cx, |this, cx| {
+                        this.handle_merge_pull(&plan, method, name.trim().to_string(), delete_branch, cx);
                     });
                 }
                 HelmModalKind::CreateRelease => {
@@ -805,6 +909,8 @@ impl Render for HelmRepositoryModal {
                                     HelmModalKind::AddCollaborator => "Add",
                                     HelmModalKind::RemoveCollaborator(_) => "Remove",
                                     HelmModalKind::CreatePull(_) => "Create",
+                                    HelmModalKind::EditPull { .. } => "Save",
+                                    HelmModalKind::MergePull(_) => "Merge",
                                     HelmModalKind::CreateRelease => "Create",
                                     HelmModalKind::EditProfile(_) => "Save",
                                     HelmModalKind::CommitIdentity { .. } => "Save",
