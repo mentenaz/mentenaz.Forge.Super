@@ -51,18 +51,35 @@ pub(crate) struct DatabasePanelTabsDb(ThreadSafeConnection);
 impl Domain for DatabasePanelTabsDb {
     const NAME: &str = stringify!(DatabasePanelTabsDb);
 
-    const MIGRATIONS: &[&str] = &[sql!(
-        CREATE TABLE database_panel_tabs (
-            workspace_id INTEGER,
-            item_id INTEGER,
-            kind TEXT NOT NULL,
-            connection_id INTEGER NOT NULL,
-            database TEXT NOT NULL,
-            PRIMARY KEY(workspace_id, item_id),
-            FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
-                ON DELETE CASCADE
-        ) STRICT;
-    )];
+    const MIGRATIONS: &[&str] = &[
+        sql!(
+            CREATE TABLE database_panel_tabs (
+                workspace_id INTEGER,
+                item_id INTEGER,
+                kind TEXT NOT NULL,
+                connection_id INTEGER NOT NULL,
+                database TEXT NOT NULL,
+                PRIMARY KEY(workspace_id, item_id),
+                FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+                    ON DELETE CASCADE
+            ) STRICT;
+        ),
+        // The databases a workspace had open, so the next launch can list
+        // them again. A connection can hold several databases at once, but
+        // the saved connection records only one, so without this the others
+        // were forgotten on restart.
+        sql!(
+            CREATE TABLE database_panel_live_databases (
+                workspace_id INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                connection_id INTEGER NOT NULL,
+                database TEXT NOT NULL,
+                PRIMARY KEY(workspace_id, position),
+                FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id)
+                    ON DELETE CASCADE
+            ) STRICT;
+        ),
+    ];
 }
 
 db::static_connection!(DatabasePanelTabsDb, [WorkspaceDb]);
@@ -117,6 +134,60 @@ impl DatabasePanelTabsDb {
             SELECT kind, connection_id, database
             FROM database_panel_tabs
             WHERE item_id = ? AND workspace_id = ?
+        }
+    }
+
+    /// Replaces the list of databases `workspace_id` had open with
+    /// `databases`, in order.
+    pub(crate) async fn save_live(
+        &self,
+        workspace_id: WorkspaceId,
+        databases: Vec<(ConnectionId, String)>,
+    ) -> Result<()> {
+        self.write(move |conn| {
+            let mut delete = Statement::prepare(
+                conn,
+                "DELETE FROM database_panel_live_databases WHERE workspace_id = ?1",
+            )?;
+            delete.bind(&workspace_id, 1)?;
+            delete.exec()?;
+
+            for (position, (connection_id, database)) in databases.iter().enumerate() {
+                let mut insert = Statement::prepare(
+                    conn,
+                    "INSERT INTO database_panel_live_databases(workspace_id, position, connection_id, database)
+                     VALUES (?1, ?2, ?3, ?4)",
+                )?;
+                let mut next = insert.bind(&workspace_id, 1)?;
+                next = insert.bind(&(position as u64), next)?;
+                next = insert.bind(&connection_id.0, next)?;
+                insert.bind(database, next)?;
+                insert.exec()?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// The databases `workspace_id` had open when it was last saved, in the
+    /// order they were saved.
+    pub(crate) fn live_for_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Vec<(ConnectionId, String)>> {
+        Ok(self
+            .live_rows(workspace_id)?
+            .into_iter()
+            .map(|(connection_id, database)| (ConnectionId(connection_id), database))
+            .collect())
+    }
+
+    query! {
+        fn live_rows(workspace_id: WorkspaceId) -> Result<Vec<(u64, String)>> {
+            SELECT connection_id, database
+            FROM database_panel_live_databases
+            WHERE workspace_id = ?
+            ORDER BY position
         }
     }
 

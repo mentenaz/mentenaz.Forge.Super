@@ -225,6 +225,10 @@ pub struct SchemaGraphTab {
     graph: gpui::Entity<SchemaGraphView>,
     key: super::SchemaKey,
     title: SharedString,
+    database_panel: WeakEntity<super::DatabasePanel>,
+    /// Set once this tab has asked for its database to be connected, which it
+    /// does the first time it shows (see `WorkbenchTab::connect_requested`).
+    connect_requested: bool,
 }
 
 impl SchemaGraphTab {
@@ -232,8 +236,15 @@ impl SchemaGraphTab {
         graph: gpui::Entity<SchemaGraphView>,
         key: super::SchemaKey,
         title: SharedString,
+        database_panel: WeakEntity<super::DatabasePanel>,
     ) -> Self {
-        Self { graph, key, title }
+        Self {
+            graph,
+            key,
+            title,
+            database_panel,
+            connect_requested: false,
+        }
     }
 }
 
@@ -246,8 +257,24 @@ impl Focusable for SchemaGraphTab {
 }
 
 impl Render for SchemaGraphTab {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        self.graph.clone()
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(panel) = self.database_panel.upgrade() else {
+            return self.graph.clone().into_any_element();
+        };
+        if !self.connect_requested {
+            self.connect_requested = true;
+            let panel = panel.clone();
+            let key = self.key.clone();
+            window.defer(cx, move |_, cx| {
+                panel.update(cx, |panel, cx| panel.request_database(key, cx));
+            });
+        }
+        if panel.read(cx).database_unavailable(&self.key) {
+            let key = self.key.clone();
+            panel.update(cx, |panel, cx| panel.render_database_placeholder(&key, cx))
+        } else {
+            self.graph.clone().into_any_element()
+        }
     }
 }
 
@@ -278,10 +305,11 @@ impl workspace::SerializableItem for SchemaGraphTab {
         cx.background_spawn(async move { db.delete_unloaded(workspace_id, alive_items).await })
     }
 
-    /// Reconnects `(connection, database)` (via `DatabasePanel::reopen_schema`)
-    /// before rebuilding the graph. On failure — connection deleted, connect
-    /// error, schema-fetch error, or timeout — shows a toast naming the
-    /// connection and fails the deserialize instead of leaving a broken tab.
+    /// Rebuilds the graph at once, from the cached schema, without waiting
+    /// for the database: the tab connects it the first time it shows (see
+    /// `connect_requested`), and until then says it is not connected. Only a
+    /// connection that has since been deleted fails the restore, with a toast
+    /// naming it.
     fn deserialize(
         _project: Entity<project::Project>,
         workspace: WeakEntity<Workspace>,
@@ -307,10 +335,16 @@ impl workspace::SerializableItem for SchemaGraphTab {
                 })
                 .ok_or_else(|| anyhow::anyhow!("Database panel not available"))?;
 
-            if let Err(reason) =
-                super::DatabasePanel::reopen_schema(panel.clone(), key.clone(), cx).await
-            {
-                log::warn!("database_panel: schema graph restore for {key:?} failed: {reason}");
+            let connection_exists = panel.read_with(cx, |panel, _| {
+                panel
+                    .connections
+                    .iter()
+                    .any(|connection| connection.id == key.0)
+            });
+            if !connection_exists {
+                log::warn!(
+                    "database_panel: schema graph restore for {key:?} failed: connection no longer exists"
+                );
                 let message = panel.read_with(cx, |panel, _| panel.reopen_failure_message(&key));
                 workspace_entity.update(cx, |workspace, cx| {
                     workspace.show_toast(
@@ -329,14 +363,15 @@ impl workspace::SerializableItem for SchemaGraphTab {
                 let (graph, title) = panel.update(cx, |panel, cx| {
                     let tables = match panel.schemas.get(&key) {
                         Some(super::SchemaState::Loaded { tables, .. }) => tables.clone(),
-                        // `reopen_schema` only returns `Ok` once the schema
-                        // has loaded, so this arm is unreachable in practice.
+                        // No schema cached for it yet: the graph starts empty
+                        // and is filled in when the database connects (see
+                        // `refresh_schema_graph`).
                         _ => std::rc::Rc::from([]),
                     };
                     let graph = panel.schema_graph_for_key(&key, &tables, cx);
                     (graph, panel.schema_graph_tab_title(id, &database))
                 });
-                anyhow::Ok(cx.new(|_| SchemaGraphTab::new(graph, key, title)))
+                anyhow::Ok(cx.new(|_| SchemaGraphTab::new(graph, key, title, panel.downgrade())))
             })?
         })
     }
@@ -406,8 +441,9 @@ impl super::DatabasePanel {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
+        let panel = cx.entity().downgrade();
         workspace.update(cx, |workspace, cx| {
-            open_schema_graph(graph, key, title, workspace, window, cx);
+            open_schema_graph(graph, key, title, panel, workspace, window, cx);
         });
     }
 
@@ -458,6 +494,7 @@ fn open_schema_graph(
     graph: gpui::Entity<SchemaGraphView>,
     key: super::SchemaKey,
     title: SharedString,
+    database_panel: WeakEntity<super::DatabasePanel>,
     workspace: &mut Workspace,
     window: &mut Window,
     cx: &mut Context<Workspace>,
@@ -472,7 +509,7 @@ fn open_schema_graph(
     if let Some(existing) = existing {
         workspace.activate_item(&existing, true, true, window, cx);
     } else {
-        let tab = cx.new(|_| SchemaGraphTab::new(graph, key, title));
+        let tab = cx.new(|_| SchemaGraphTab::new(graph, key, title, database_panel));
         workspace.add_item_to_active_pane(Box::new(tab), None, true, window, cx);
     }
 }

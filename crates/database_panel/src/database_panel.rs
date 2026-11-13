@@ -14,7 +14,7 @@
 
 mod database_panel_settings;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -350,6 +350,27 @@ struct SerializedDatabasePanel {
     active_connection_by_type: HashMap<DbType, ConnectionId>,
 }
 
+/// The databases of connection `id` to list: those with a live session and
+/// those remembered from last session that are not connected yet, sorted by
+/// name and without repeats. SQLite's empty name is never listed.
+fn remembered_names(
+    live: &HashSet<SchemaKey>,
+    parked: &HashMap<ConnectionId, Vec<String>>,
+    id: ConnectionId,
+) -> Vec<String> {
+    let mut names: Vec<String> = live
+        .iter()
+        .filter(|(connection_id, database)| *connection_id == id && !database.is_empty())
+        .map(|(_, database)| database.clone())
+        .collect();
+    if let Some(parked) = parked.get(&id) {
+        names.extend(parked.iter().cloned());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 pub struct DatabasePanel {
     focus_handle: FocusHandle,
     /// Held so the "Workbench" button can open/activate a real workspace tab
@@ -427,10 +448,32 @@ pub struct DatabasePanel {
     /// ones with no currently-open `WorkbenchState` — seeds a fresh
     /// `WorkbenchState.history` the next time that key's workbench opens.
     workbench_history: HashMap<SchemaKey, Vec<String>>,
+    /// Which `(connection, database)` sessions are live. A copy of what the
+    /// registry holds, kept here because the registry is moved into the task
+    /// for as long as a connect, schema fetch or query is running (see
+    /// `registry_busy`), and a tab must not look disconnected for that long.
+    /// Updated by [`Self::refresh_live_keys`] wherever the set can change.
+    live_keys: HashSet<SchemaKey>,
+    /// Databases this workspace had open last session that are not connected
+    /// now. They stay in the database tab strip, marked as not connected, and
+    /// connect when their tab is chosen or a restored tab for them is shown.
+    parked_databases: HashMap<ConnectionId, Vec<String>>,
+    /// Databases a restored tab or a Connect button has asked to be dialled
+    /// and that have not finished yet.
+    pending_dials: HashSet<SchemaKey>,
+    /// Set while the saved connections are being reconnected after a restart.
+    /// A database asked for by a restored tab waits for this to clear, so it
+    /// cannot be dialled in between and make that reconnect fail on a database
+    /// that is already connected.
+    startup_reconnect: bool,
+    /// The workspace this panel belongs to, for saving which databases it had
+    /// open. `None` for a workspace that is not saved.
+    workspace_id: Option<workspace::WorkspaceId>,
     _filter_subscription: Subscription,
     _persist_task: Task<()>,
     _schema_persist_task: Task<()>,
     _workbench_persist_task: Task<()>,
+    _live_persist_task: Task<()>,
 }
 
 impl DatabasePanel {
@@ -455,6 +498,7 @@ impl DatabasePanel {
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         let workspace_handle = workspace.weak_handle();
+        let workspace_id = workspace.database_id();
         cx.new(|cx| {
             let SerializedDatabasePanel {
                 connections,
@@ -481,6 +525,21 @@ impl DatabasePanel {
                         views: views.into(),
                     },
                 );
+            }
+
+            // The databases this workspace had open last session. None is
+            // connected yet; they are listed as not connected and dialled when
+            // they are chosen or a restored tab for them shows.
+            let mut parked_databases: HashMap<ConnectionId, Vec<String>> = HashMap::default();
+            if let Some(workspace_id) = workspace_id {
+                let saved = persistence::DatabasePanelTabsDb::global(cx)
+                    .live_for_workspace(workspace_id)
+                    .unwrap_or_default();
+                for (id, database) in saved {
+                    if !database.is_empty() && connections.iter().any(|c| c.id == id) {
+                        parked_databases.entry(id).or_default().push(database);
+                    }
+                }
             }
 
             let new_connection_title = cx.new(|cx| InputState::new(window, cx));
@@ -549,10 +608,16 @@ impl DatabasePanel {
                 workbenches: HashMap::default(),
                 schema_graphs: HashMap::default(),
                 workbench_history: Self::load_persisted_workbench_history(cx),
+                live_keys: HashSet::default(),
+                parked_databases,
+                pending_dials: HashSet::default(),
+                startup_reconnect: false,
+                workspace_id,
                 _filter_subscription,
                 _persist_task: Task::ready(()),
                 _schema_persist_task: Task::ready(()),
                 _workbench_persist_task: Task::ready(()),
+                _live_persist_task: Task::ready(()),
             }
         })
     }
@@ -579,6 +644,7 @@ impl DatabasePanel {
             return;
         }
 
+        self.startup_reconnect = true;
         let panel = cx.entity();
         cx.spawn(async move |_, cx| {
             for id in ids {
@@ -609,8 +675,227 @@ impl DatabasePanel {
                         .await;
                 }
             }
+            panel.update(cx, |panel, cx| {
+                panel.startup_reconnect = false;
+                cx.notify();
+            });
         })
         .detach();
+    }
+
+    /// Recomputes [`Self::live_keys`] from the registry and saves which
+    /// databases are open. Call it wherever a session may have been added or
+    /// removed, and only while the registry is in the panel (not moved into a
+    /// task).
+    fn refresh_live_keys(&mut self, cx: &mut Context<Self>) {
+        let mut live = HashSet::default();
+        for connection in &self.connections {
+            let id = connection.id;
+            for database in self.registry.live_databases(id) {
+                live.insert((id, database));
+            }
+            // SQLite, and a MySQL connection with no default database, live
+            // under the empty name, which `live_databases` leaves out.
+            if self.registry.is_database_connected(id, "") {
+                live.insert((id, String::new()));
+            }
+        }
+        // A database that is connected is no longer waiting to be.
+        for (id, database) in &live {
+            if let Some(parked) = self.parked_databases.get_mut(id) {
+                parked.retain(|name| name != database);
+            }
+        }
+        self.parked_databases.retain(|_, names| !names.is_empty());
+        self.live_keys = live;
+        self.persist_live_databases(cx);
+        cx.notify();
+    }
+
+    /// The databases of `id` to list in its tab strip: the connected ones and
+    /// those remembered from last session, sorted by name.
+    fn remembered_databases(&self, id: ConnectionId) -> Vec<String> {
+        remembered_names(&self.live_keys, &self.parked_databases, id)
+    }
+
+    /// Saves, for this workspace, the databases to list again next launch:
+    /// the connected ones and those still waiting to be. After a short delay,
+    /// like [`Self::persist_connections`].
+    fn persist_live_databases(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace_id) = self.workspace_id else {
+            return;
+        };
+        let databases: Vec<(ConnectionId, String)> = self
+            .connections
+            .iter()
+            .flat_map(|connection| {
+                let id = connection.id;
+                self.remembered_databases(id)
+                    .into_iter()
+                    .map(move |database| (id, database))
+            })
+            .collect();
+        let db = persistence::DatabasePanelTabsDb::global(cx);
+        self._live_persist_task = cx.spawn(async move |_this, cx| {
+            cx.background_executor()
+                .timer(SERIALIZATION_THROTTLE_TIME)
+                .await;
+            cx.background_spawn(async move { db.save_live(workspace_id, databases).await })
+                .await
+                .ok();
+        });
+    }
+
+    /// Drops a remembered database that was never reconnected (the "x" on its
+    /// not-connected tab), so it is not listed again.
+    fn forget_parked_database(&mut self, id: ConnectionId, database: &str, cx: &mut Context<Self>) {
+        if let Some(parked) = self.parked_databases.get_mut(&id) {
+            parked.retain(|name| name != database);
+        }
+        self.parked_databases.retain(|_, names| !names.is_empty());
+        self.persist_live_databases(cx);
+        cx.notify();
+    }
+
+    /// Connects `key`'s database if it is not connected, once the registry is
+    /// free. This is what a restored tab does when it first shows, and what
+    /// the Connect and Retry buttons do.
+    pub(crate) fn request_database(&mut self, key: SchemaKey, cx: &mut Context<Self>) {
+        if self.live_keys.contains(&key)
+            || !self.connections.iter().any(|c| c.id == key.0)
+            || !self.pending_dials.insert(key.clone())
+        {
+            return;
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            // Wait for the registry, and for the reconnect after a restart,
+            // which this must not get in front of.
+            loop {
+                let ready = this
+                    .update(cx, |this, _| !this.registry_busy && !this.startup_reconnect)
+                    .unwrap_or(true);
+                if ready {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+            }
+            this.update(cx, |this, cx| {
+                // The reconnect may have connected it in the meantime.
+                if !this.live_keys.contains(&key) {
+                    this.dial_database(&key, cx);
+                }
+            })
+            .ok();
+            loop {
+                let busy = this.update(cx, |this, _| this.registry_busy).unwrap_or(false);
+                if !busy {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+            }
+            this.update(cx, |this, cx| {
+                this.pending_dials.remove(&key);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Dials `key`'s database the way each kind of connection does it: a
+    /// SQLite file or an Oracle service is the connection itself, and a
+    /// server's database is chosen by name.
+    fn dial_database(&mut self, key: &SchemaKey, cx: &mut Context<Self>) {
+        let (id, database) = key;
+        let Some(db_type) = self
+            .connections
+            .iter()
+            .find(|connection| connection.id == *id)
+            .map(|connection| connection.db_type)
+        else {
+            return;
+        };
+        match db_type {
+            DbType::Sqlite | DbType::Oracle => self.connect(*id, cx),
+            DbType::Postgres | DbType::MySql | DbType::MsSql => {
+                self.select_database(*id, database.clone(), cx)
+            }
+        }
+    }
+
+    /// True when `key`'s database has no live session, so a tab for it has
+    /// nothing to show yet.
+    pub(crate) fn database_unavailable(&self, key: &SchemaKey) -> bool {
+        !self.live_keys.contains(key)
+    }
+
+    /// What a tab for a database that is not connected shows instead of its
+    /// content: that it is connecting, or why it is not, with a button to try.
+    pub(crate) fn render_database_placeholder(
+        &self,
+        key: &SchemaKey,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let id = key.0;
+        let connecting = self.pending_dials.contains(key)
+            || matches!(self.statuses.get(&id), Some(ConnectionStatus::Connecting));
+        let failure = match self.statuses.get(&id) {
+            Some(ConnectionStatus::Error(message)) if !connecting => Some(message.clone()),
+            _ => None,
+        };
+        let name = if key.1.is_empty() {
+            self.connections
+                .iter()
+                .find(|connection| connection.id == id)
+                .map(|connection| connection.title.clone())
+                .unwrap_or_default()
+        } else {
+            key.1.clone()
+        };
+        let headline = if connecting {
+            format!("Connecting to {name}…")
+        } else if failure.is_some() {
+            format!("Could not connect to {name}")
+        } else {
+            format!("{name} is not connected")
+        };
+        let retry_label = if failure.is_some() { "Retry" } else { "Connect" };
+        let key = key.clone();
+
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(if connecting {
+                Spinner::new().into_any_element()
+            } else {
+                Icon::new(GIconName::SquareTerminal)
+                    .with_size(Size::Large)
+                    .text_color(cx.theme().muted_foreground)
+                    .into_any_element()
+            })
+            .child(Label::new(headline).size(LabelSize::Default))
+            .children(failure.map(|message| {
+                Label::new(message)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted)
+            }))
+            .when(!connecting, |column| {
+                column.child(
+                    Button::new(("database-connect", id.0))
+                        .label(retry_label)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.request_database(key.clone(), cx);
+                        })),
+                )
+            })
+            .into_any_element()
     }
 
     fn load_persisted_schema_cache(
@@ -713,7 +998,18 @@ impl DatabasePanel {
         let Some(database) = self.registry.active_database(id) else {
             return;
         };
-        let key: SchemaKey = (id, database);
+        self.fetch_schema_for((id, database), cx);
+    }
+
+    /// [`Self::fetch_schema`] for one specific database of a connection, which
+    /// need not be its active one: a tab shows its own database whichever is
+    /// active. Does nothing unless that database has a live session.
+    fn fetch_schema_for(&mut self, key: SchemaKey, cx: &mut Context<Self>) {
+        let id = key.0;
+        if self.registry_busy || !self.registry.is_database_connected(id, &key.1) {
+            return;
+        }
+        let database = key.1.clone();
 
         self.schemas.insert(key.clone(), SchemaState::Loading);
         self.registry_busy = true;
@@ -723,7 +1019,7 @@ impl DatabasePanel {
 
         cx.spawn(async move |this, cx| {
             let result = gpui_tokio::Tokio::spawn_result(cx, async move {
-                let schema = registry.fetch_schema(id).await;
+                let schema = registry.fetch_schema_database(id, &database).await;
                 anyhow::Ok((registry, schema))
             })
             .await;
@@ -738,9 +1034,21 @@ impl DatabasePanel {
                         // The workbench sidebar keeps its own tree (so its
                         // scroll and selection don't follow the explorer's),
                         // so it needs the new tables pushed in too.
-                        if let Some(tree_state) = this.workbench_tree_states.get(&key) {
-                            let items = schema_tree_items(&schema.tables, &schema.views, "");
-                            tree_state.update(cx, |tree_state, cx| tree_state.set_items(items, cx));
+                        let items = schema_tree_items(&schema.tables, &schema.views, "");
+                        match this.workbench_tree_states.get(&key) {
+                            Some(tree_state) => {
+                                tree_state.update(cx, |tree_state, cx| {
+                                    tree_state.set_items(items, cx)
+                                });
+                            }
+                            // A workbench restored before its database had a
+                            // schema (not cached, and not connected until
+                            // now) has no tree yet; give it one.
+                            None if this.workbenches.contains_key(&key) => {
+                                let tree_state = cx.new(|cx| TreeState::new(cx).items(items));
+                                this.workbench_tree_states.insert(key.clone(), tree_state);
+                            }
+                            None => {}
                         }
                         this.schemas.insert(
                             key.clone(),
@@ -765,6 +1073,7 @@ impl DatabasePanel {
                         this.statuses.clear();
                         this.schemas
                             .insert(key, SchemaState::Error(err.to_string()));
+                        this.refresh_live_keys(cx);
                     }
                 }
                 cx.notify();
@@ -1153,6 +1462,7 @@ impl DatabasePanel {
                 match self.registry.connect_sqlite(id, &path) {
                     Ok(()) => {
                         self.statuses.insert(id, ConnectionStatus::Connected);
+                        self.refresh_live_keys(cx);
                         self.fetch_schema(id, cx);
                     }
                     Err(err) => {
@@ -1185,84 +1495,8 @@ impl DatabasePanel {
         }
     }
 
-    /// Drives `key`'s connection (via the existing `connect`/`fetch_schema`
-    /// entry points) to a loaded schema, for a workbench/graph tab being
-    /// restored from a previous session — see `workbench::WorkbenchTab` and
-    /// `graph::SchemaGraphTab`'s `SerializableItem::deserialize`, this
-    /// function's only callers.
-    ///
-    /// `connect`/`fetch_schema` report completion only by writing into
-    /// `self.statuses`/`self.schemas` (see their doc comments — there's no
-    /// channel or future of their own), so this polls those maps on a short
-    /// timer instead of awaiting a result directly. Returns `Err` with a
-    /// message fit for a toast if the connection no longer exists, fails to
-    /// connect, fails to fetch its schema, or exceeds a generous timeout —
-    /// callers close the tab rather than leave a stuck placeholder.
-    pub(crate) fn reopen_schema(
-        panel: Entity<Self>,
-        key: SchemaKey,
-        cx: &mut AsyncWindowContext,
-    ) -> Task<Result<(), String>> {
-        cx.spawn(async move |cx| {
-            let id = key.0;
-
-            let exists = panel.update(cx, |panel, cx| {
-                if !panel.connections.iter().any(|c| c.id == id) {
-                    return false;
-                }
-                match panel.statuses.get(&id) {
-                    Some(ConnectionStatus::Connected) => {
-                        if !matches!(panel.schemas.get(&key), Some(SchemaState::Loading)) {
-                            panel.fetch_schema(id, cx);
-                        }
-                    }
-                    Some(ConnectionStatus::Connecting) => {}
-                    _ => panel.connect(id, cx),
-                }
-                true
-            });
-
-            if !exists {
-                return Err("Connection no longer exists".to_string());
-            }
-
-            // `AsyncWindowContext` has no `background_executor()` of its own
-            // (only `App` does) — pull one out through `update` once, then
-            // reuse it for every poll tick below.
-            let executor = cx
-                .update(|_, cx| cx.background_executor().clone())
-                .map_err(|_| "Database panel is gone".to_string())?;
-
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-            loop {
-                let (schema, status) = panel.read_with(cx, |panel, _| {
-                    (
-                        panel.schemas.get(&key).cloned(),
-                        panel.statuses.get(&id).cloned(),
-                    )
-                });
-
-                match schema {
-                    Some(SchemaState::Loaded { .. }) => return Ok(()),
-                    Some(SchemaState::Error(message)) => return Err(message),
-                    _ => {}
-                }
-                if let Some(ConnectionStatus::Error(message)) = status {
-                    return Err(message);
-                }
-                if std::time::Instant::now() >= deadline {
-                    return Err("Timed out waiting to reconnect".to_string());
-                }
-
-                executor.timer(std::time::Duration::from_millis(150)).await;
-            }
-        })
-    }
-
-    /// The toast message for a workbench/graph tab that failed to reconnect
-    /// on restore (see `reopen_schema`, whose `Err` string is logged
-    /// separately rather than shown to the user — the toast stays a short,
-    /// consistent shape regardless of the underlying driver error).
+    /// The toast message for a workbench/graph tab whose connection can no
+    /// longer be found on restore.
     pub(crate) fn reopen_failure_message(&self, key: &SchemaKey) -> String {
         let (id, database) = key;
         match self.connections.iter().find(|c| c.id == *id) {
@@ -1321,6 +1555,9 @@ impl DatabasePanel {
             });
         let ssl = connection.ssl;
         let key = credential_url(db_type, &host, port);
+        // The database being dialled, which its schema is fetched for once it
+        // is connected (it is not necessarily the connection's active one).
+        let dialed_database = database.clone();
 
         log::info!(
             "database_panel: connecting {db_type:?} connection {id:?} \
@@ -1397,8 +1634,8 @@ impl DatabasePanel {
                         log::info!("database_panel: connect {id:?} succeeded");
                         this.registry = registry;
                         this.statuses.insert(id, ConnectionStatus::Connected);
-                        cx.notify();
-                        this.fetch_schema(id, cx);
+                        this.refresh_live_keys(cx);
+                        this.fetch_schema_for((id, dialed_database), cx);
                         return;
                     }
                     Ok((registry, Err(err))) => {
@@ -1415,6 +1652,7 @@ impl DatabasePanel {
                         this.statuses.clear();
                         this.statuses
                             .insert(id, ConnectionStatus::Error(err.to_string()));
+                        this.refresh_live_keys(cx);
                     }
                 }
                 cx.notify();
@@ -1755,9 +1993,18 @@ impl DatabasePanel {
         if self.registry_busy {
             return;
         }
+        // Disconnecting the connection is not closing its databases: they stay
+        // in the tab strip, not connected, and connect again when chosen.
+        let open: Vec<String> = self
+            .live_keys
+            .iter()
+            .filter(|(connection_id, database)| *connection_id == id && !database.is_empty())
+            .map(|(_, database)| database.clone())
+            .collect();
+        self.parked_databases.entry(id).or_default().extend(open);
         self.registry.disconnect(id).ok();
         self.statuses.insert(id, ConnectionStatus::Disconnected);
-        cx.notify();
+        self.refresh_live_keys(cx);
     }
 
     /// Closes one database's live session on `id` (the database tab strip's
@@ -1779,7 +2026,7 @@ impl DatabasePanel {
             connection.database = active;
         }
         self.persist_connections(cx);
-        cx.notify();
+        self.refresh_live_keys(cx);
     }
 
     /// Confirms before dropping a saved connection — irreversible (there is
@@ -1817,6 +2064,8 @@ impl DatabasePanel {
                 this.registry.disconnect(id).ok();
                 this.statuses.remove(&id);
                 this.connections.retain(|connection| connection.id != id);
+                this.parked_databases.remove(&id);
+                this.refresh_live_keys(cx);
                 // A connection can have several `(id, database)` schema/tree-state
                 // slots now (one per database that was ever opened this session) —
                 // drop all of them, not just a single `id`-keyed one.
@@ -2537,5 +2786,64 @@ impl Render for DatabasePanel {
             .child(self.render_type_tabs(cx))
             .child(self.render_connection_tabs(&connections, cx))
             .child(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn live(keys: &[(u64, &str)]) -> HashSet<SchemaKey> {
+        keys.iter()
+            .map(|(id, database)| (ConnectionId(*id), database.to_string()))
+            .collect()
+    }
+
+    fn parked(entries: &[(u64, &[&str])]) -> HashMap<ConnectionId, Vec<String>> {
+        entries
+            .iter()
+            .map(|(id, names)| {
+                (
+                    ConnectionId(*id),
+                    names.iter().map(|name| name.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_connections_tab_strip_lists_connected_and_remembered_databases_together() {
+        let names = remembered_names(
+            &live(&[(1, "shop"), (1, "audit")]),
+            &parked(&[(1, &["reports", "archive"])]),
+            ConnectionId(1),
+        );
+        assert_eq!(names, ["archive", "audit", "reports", "shop"]);
+    }
+
+    #[test]
+    fn a_database_that_is_both_connected_and_remembered_is_listed_once() {
+        let names = remembered_names(
+            &live(&[(1, "shop")]),
+            &parked(&[(1, &["shop", "audit"])]),
+            ConnectionId(1),
+        );
+        assert_eq!(names, ["audit", "shop"]);
+    }
+
+    #[test]
+    fn another_connections_databases_are_not_listed() {
+        let names = remembered_names(
+            &live(&[(1, "shop"), (2, "orders")]),
+            &parked(&[(2, &["billing"])]),
+            ConnectionId(1),
+        );
+        assert_eq!(names, ["shop"]);
+    }
+
+    #[test]
+    fn the_empty_name_a_sqlite_file_lives_under_is_not_listed() {
+        let names = remembered_names(&live(&[(1, "")]), &parked(&[]), ConnectionId(1));
+        assert!(names.is_empty());
     }
 }

@@ -238,42 +238,69 @@ impl DatabasePanel {
         let is_opening = self.opening_database_for == Some(id);
         let busy = self.registry_busy;
         let input_border = cx.theme().border;
-        let live = self.registry.live_databases(id);
+        // Every database to list: the connected ones, and those this
+        // workspace had open last session that are not connected yet.
+        let live = self.remembered_databases(id);
         let active = self.registry.active_database(id);
         let active_ix = active
             .as_ref()
             .and_then(|active| live.iter().position(|name| name == active));
+        let muted = cx.theme().muted_foreground;
 
         let mut tab_bar = TabBar::new(("database-tabs", id.0))
             .with_variant(TabVariant::Underline)
             .px_3()
             .children(live.iter().enumerate().map(|(ix, name)| {
+                let connected = self.live_keys.contains(&(id, name.clone()));
                 Tab::new().label(name.clone()).disabled(busy).suffix(
-                    div()
-                        .id(("close-database-tab", ix))
-                        .ml_1()
-                        .rounded(px(3.))
-                        .p(px(1.))
-                        .hover(|this| this.bg(cx.theme().secondary))
-                        // A click on the "x" must never also select the tab
-                        // it's sitting inside of (Tab's own `on_click` wraps
-                        // this suffix too) — stop it at mouse-down, before
-                        // the tab's click handler ever sees it.
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click({
-                            let name = name.clone();
-                            cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.disconnect_database(id, name.clone(), cx);
-                            })
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .when(!connected, |row| {
+                            row.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child("not connected"),
+                            )
                         })
-                        .child(Icon::new(GIconName::Close).with_size(Size::XSmall)),
+                        .child(
+                            div()
+                                .id(("close-database-tab", ix))
+                                .ml_1()
+                                .rounded(px(3.))
+                                .p(px(1.))
+                                .hover(|this| this.bg(cx.theme().secondary))
+                                // A click on the "x" must never also select the tab
+                                // it's sitting inside of (Tab's own `on_click` wraps
+                                // this suffix too) — stop it at mouse-down, before
+                                // the tab's click handler ever sees it.
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .on_click({
+                                    let name = name.clone();
+                                    cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        cx.stop_propagation();
+                                        if connected {
+                                            this.disconnect_database(id, name.clone(), cx);
+                                        } else {
+                                            // Never connected this session: just stop
+                                            // listing it.
+                                            this.forget_parked_database(id, &name, cx);
+                                        }
+                                    })
+                                })
+                                .child(Icon::new(GIconName::Close).with_size(Size::XSmall)),
+                        ),
                 )
             }))
             .on_click(cx.listener({
                 let live = live.clone();
                 move |this, ix: &usize, _, cx| {
                     if let Some(name) = live.get(*ix) {
+                        // A database that is not connected is connected by
+                        // choosing it.
                         this.select_database(id, name.clone(), cx);
                     }
                 }

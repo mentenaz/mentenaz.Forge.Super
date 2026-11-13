@@ -555,21 +555,21 @@ impl DatabasePanel {
         let database = self.registry.active_database(id).unwrap_or_default();
         let key: SchemaKey = (id, database);
         self.insert_workbench_sql(&key, sql, window, cx);
-        self.run_workbench_query(id, cx);
+        self.run_workbench_query(key, cx);
     }
 
-    /// Runs the workbench editor's current SQL against `id`'s active
-    /// database session. Mirrors `fetch_schema`'s `mem::take`/`registry_busy`
-    /// dance (see its doc comment) — `execute_query` is `&self`, but the
-    /// task must still own the registry to stay `'static`.
-    fn run_workbench_query(&mut self, id: ConnectionId, cx: &mut Context<Self>) {
-        if self.registry_busy {
+    /// Runs the workbench editor's current SQL against `key`'s own database,
+    /// whichever database the connection has active: a tab belongs to one
+    /// database, and with several open a run must not land on another. Does
+    /// nothing unless that database is connected. Mirrors `fetch_schema`'s
+    /// `mem::take`/`registry_busy` dance (see its doc comment) — the query is
+    /// `&self`, but the task must still own the registry to stay `'static`.
+    fn run_workbench_query(&mut self, key: SchemaKey, cx: &mut Context<Self>) {
+        if self.registry_busy || !self.live_keys.contains(&key) {
             return;
         }
-        let Some(database) = self.registry.active_database(id) else {
-            return;
-        };
-        let key: SchemaKey = (id, database);
+        let id = key.0;
+        let database = key.1.clone();
         let Some(workbench) = self.workbenches.get(&key) else {
             return;
         };
@@ -605,7 +605,7 @@ impl DatabasePanel {
 
         cx.spawn(async move |this, cx| {
             let result = gpui_tokio::Tokio::spawn_result(cx, async move {
-                let outcome = registry.execute_query(id, &sql).await;
+                let outcome = registry.execute_query_database(id, &database, &sql).await;
                 anyhow::Ok((registry, outcome))
             })
             .await;
@@ -622,7 +622,7 @@ impl DatabasePanel {
                         // Even a failed script may have applied its earlier
                         // statements, so refresh regardless of the outcome.
                         if refresh_schema {
-                            this.fetch_schema(id, cx);
+                            this.fetch_schema_for(key.clone(), cx);
                         }
                     }
                     Err(err) => {
@@ -632,6 +632,7 @@ impl DatabasePanel {
                         // live in it — is gone.
                         this.registry = ConnectionRegistry::new();
                         this.statuses.clear();
+                        this.refresh_live_keys(cx);
                         if let Some(workbench) = this.workbenches.get_mut(&key) {
                             workbench.running = false;
                             workbench.result = Some(Err(err.to_string()));
@@ -867,6 +868,7 @@ impl DatabasePanel {
             return div().into_any_element();
         };
         let busy = self.registry_busy;
+        let run_key = key.clone();
 
         v_flex()
             .id(("workbench-editor", id.0))
@@ -896,7 +898,7 @@ impl DatabasePanel {
                                 .label(if running { "Running…" } else { "Run" })
                                 .icon(GIconName::Play)
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    this.run_workbench_query(id, cx);
+                                    this.run_workbench_query(run_key.clone(), cx);
                                 })),
                         ),
                     ),
@@ -1231,6 +1233,10 @@ pub struct WorkbenchTab {
     database_panel: Entity<DatabasePanel>,
     key: SchemaKey,
     title: SharedString,
+    /// Set once this tab has asked for its database to be connected, which it
+    /// does the first time it shows: a tab restored from last session opens
+    /// at once and connects here, not while the app starts.
+    connect_requested: bool,
 }
 
 impl WorkbenchTab {
@@ -1246,6 +1252,7 @@ impl WorkbenchTab {
             database_panel,
             key,
             title,
+            connect_requested: false,
         }
     }
 }
@@ -1261,10 +1268,22 @@ impl Focusable for WorkbenchTab {
 impl Render for WorkbenchTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let key = self.key.clone();
+        if !self.connect_requested {
+            self.connect_requested = true;
+            let panel = self.database_panel.clone();
+            let key = key.clone();
+            window.defer(cx, move |_, cx| {
+                panel.update(cx, |panel, cx| panel.request_database(key, cx));
+            });
+        }
         self.database_panel.update(cx, |panel, cx| {
-            panel
-                .render_workbench_body(&key, window, cx)
-                .into_any_element()
+            if panel.database_unavailable(&key) {
+                panel.render_database_placeholder(&key, cx)
+            } else {
+                panel
+                    .render_workbench_body(&key, window, cx)
+                    .into_any_element()
+            }
         })
     }
 }
@@ -1299,10 +1318,12 @@ impl workspace::SerializableItem for WorkbenchTab {
         cx.background_spawn(async move { db.delete_unloaded(workspace_id, alive_items).await })
     }
 
-    /// Reconnects `(connection, database)` (via `DatabasePanel::reopen_schema`)
-    /// before recreating the tab. On failure — connection deleted, connect
-    /// error, schema-fetch error, or timeout — shows a toast naming the
-    /// connection and fails the deserialize instead of leaving a broken tab.
+    /// Recreates the tab at once, without waiting for its database: the tab
+    /// connects it the first time it shows (see `connect_requested`), and
+    /// until then says it is not connected. Waiting here made every restored
+    /// tab queue behind the others' connections and time out. Only a
+    /// connection that has since been deleted fails the restore, with a toast
+    /// naming it.
     fn deserialize(
         _project: Entity<project::Project>,
         workspace: gpui::WeakEntity<Workspace>,
@@ -1326,9 +1347,14 @@ impl workspace::SerializableItem for WorkbenchTab {
                 .read_with(cx, |workspace, cx| workspace.panel::<DatabasePanel>(cx))
                 .ok_or_else(|| anyhow::anyhow!("Database panel not available"))?;
 
-            if let Err(reason) = DatabasePanel::reopen_schema(panel.clone(), key.clone(), cx).await
-            {
-                log::warn!("database_panel: workbench restore for {key:?} failed: {reason}");
+            let connection_exists = panel.read_with(cx, |panel, _| {
+                panel
+                    .connections
+                    .iter()
+                    .any(|connection| connection.id == key.0)
+            });
+            if !connection_exists {
+                log::warn!("database_panel: workbench restore for {key:?} failed: connection no longer exists");
                 let message = panel.read_with(cx, |panel, _| panel.reopen_failure_message(&key));
                 workspace_entity.update(cx, |workspace, cx| {
                     workspace.show_toast(

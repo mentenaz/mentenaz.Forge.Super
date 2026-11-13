@@ -60,8 +60,28 @@ right.
 **Schema Graph** opens a tab drawing tables as nodes and foreign keys as
 edges, laid out automatically, on a pannable and zoomable canvas.
 
+### Restarting
+
 Workbench and Schema Graph tabs are remembered and reopened on the next
-launch, reconnecting as needed.
+launch, and so are the databases each workspace had open.
+
+- **Every tab comes back at once.** A tab does not wait for its database
+  while the app starts.
+- **Only the active database of each connection connects at startup.** The
+  others are listed in the database tab strip marked "not connected", and a
+  tab for one says so, with a **Connect** button. Choosing the database in the
+  strip, or showing its tab for the first time, connects it.
+- **A failure stays on the tab.** It shows the reason and **Retry**; the tab
+  is not closed.
+- **The list is saved per workspace**, in `database_panel_live_databases`, so
+  two workspaces that use the same server each get back their own databases.
+  A database you close with its "x" is dropped from the list; disconnecting a
+  whole connection keeps its databases listed.
+- A connection that has since been deleted still fails to restore its tabs,
+  with a toast.
+
+A tab runs its queries, and refreshes its schema, against its own database,
+not whichever one the connection has active.
 
 ## How it is wired
 
@@ -92,7 +112,7 @@ and database, so closing and reopening a tab does not lose it.
 | `src/ir.rs` | UI-independent schema graph representation |
 | `src/layout.rs` | Deterministic graph layout |
 | `src/graph.rs` | Conversion to `gpui_flow` and the graph tab |
-| `src/persistence.rs` | Which workbench/graph tabs were open |
+| `src/persistence.rs` | Which workbench/graph tabs were open, and which databases each workspace had open |
 
 All database access goes through
 [`database_backend`](../database_backend/README.md). The graph canvas is
