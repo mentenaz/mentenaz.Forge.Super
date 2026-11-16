@@ -85,7 +85,7 @@ impl<T> Area<T> {
         self
     }
 
-    fn path(&self, bounds: &Bounds<Pixels>) -> (Option<Path<Pixels>>, Option<Path<Pixels>>) {
+    fn path(&self, bounds: &Bounds<Pixels>) -> (Option<Path>, Option<Path>) {
         let origin = bounds.origin;
         let mut area_builder = PathBuilder::fill();
         let mut line_builder = PathBuilder::stroke(px(1.));

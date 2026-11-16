@@ -102,14 +102,6 @@ impl ScrollableMask {
     }
 }
 
-impl IntoElement for ScrollableMask {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for ScrollableMask {
     type RequestLayoutState = ();
     type PrepaintState = Hitbox;

@@ -7,15 +7,8 @@ pub fn derive_into_plot(input: TokenStream) -> TokenStream {
     let type_name = &ast.ident;
     let (impl_generics, type_generics, where_clause) = ast.generics.split_for_impl();
 
+    // No `IntoElement` impl is generated: gpui provides one for every `Element`.
     let expanded = quote! {
-        impl #impl_generics gpui::IntoElement for #type_name #type_generics #where_clause {
-            type Element = Self;
-
-            fn into_element(self) -> Self::Element {
-                self
-            }
-        }
-
         impl #impl_generics #type_name #type_generics #where_clause {
             /// Element-local cell holding the last cursor position (plot-relative), shared by
             /// the generated `prepaint`/`paint` so the cell type lives in a single place.

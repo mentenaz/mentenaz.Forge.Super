@@ -6,7 +6,7 @@
 
 use gpui::{
     Anchor, AnyElement, App, Bounds, Display, Element, GlobalElementId, Half as _,
-    InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Point, Position, Size, Style,
+    InspectorElementId, LayoutId, ParentElement, Pixels, Point, Position, Size, Style,
     Window, point, px,
 };
 
@@ -350,14 +350,6 @@ impl Element for Positioner {
         for child in &mut self.children {
             child.paint(window, cx);
         }
-    }
-}
-
-impl IntoElement for Positioner {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 

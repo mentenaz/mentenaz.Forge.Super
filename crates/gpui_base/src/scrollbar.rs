@@ -9,7 +9,7 @@ use crate::{
 };
 use gpui::{
     Anchor, App, Axis, Background, BorderStyle, Bounds, ContentMask, CursorStyle, Edges, Element,
-    ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
+    ElementId, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
     IsZero, LayoutId, ListState, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels,
     Point, Position, ScrollEvent, ScrollHandle, Size, Style, UniformListScrollHandle, Window, fill,
     point, prelude::FluentBuilder, px, relative, size,
@@ -1082,14 +1082,6 @@ impl Scrollbar {
     }
 }
 
-impl IntoElement for Scrollbar {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 #[doc(hidden)]
 pub struct PrepaintState {
     hitbox: Hitbox,
@@ -1462,7 +1454,7 @@ impl Element for Scrollbar {
 
                     window.set_cursor_style(CursorStyle::default(), &state.bar_hitbox);
 
-                    window.paint_layer(hitbox_bounds, |cx| {
+                    window.paint_layer(|cx| {
                         cx.paint_quad(fill(painted_bounds, painted_track_bg));
 
                         cx.paint_quad(PaintQuad {
@@ -1671,8 +1663,8 @@ mod tests {
     use std::cell::Cell;
 
     use gpui::{
-        Context, Modifiers, MouseButton, ParentElement as _, Render, Styled as _, TestAppContext,
-        VisualTestContext, div,
+        Context, IntoElement, Modifiers, MouseButton, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, div,
     };
 
     #[test]

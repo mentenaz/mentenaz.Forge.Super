@@ -1619,14 +1619,6 @@ struct TextSelectionScopeMarker<E> {
     element: E,
 }
 
-impl<E: Element> IntoElement for TextSelectionScopeMarker<E> {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl<E: Element> Element for TextSelectionScopeMarker<E> {
     type RequestLayoutState = E::RequestLayoutState;
     type PrepaintState = E::PrepaintState;
@@ -1695,14 +1687,6 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
 
 #[doc(hidden)]
 pub struct TextSelectionLayerPrepaintState(Entity<WindowSelectionState>);
-
-impl IntoElement for TextSelectionLayer {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
 
 impl Element for TextSelectionLayer {
     type RequestLayoutState = ();

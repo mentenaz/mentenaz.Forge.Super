@@ -124,7 +124,7 @@ impl<T> Line<T> {
         )
     }
 
-    fn path(&self, bounds: &Bounds<Pixels>) -> (Option<Path<Pixels>>, Vec<PaintQuad>) {
+    fn path(&self, bounds: &Bounds<Pixels>) -> (Option<Path>, Vec<PaintQuad>) {
         let origin = bounds.origin;
         let mut builder = PathBuilder::stroke(self.stroke_width);
         let mut dots = vec![];

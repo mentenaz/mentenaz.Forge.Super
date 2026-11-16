@@ -88,14 +88,6 @@ impl PlainSelectableText {
     }
 }
 
-impl IntoElement for PlainSelectableText {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for PlainSelectableText {
     type RequestLayoutState = ();
     type PrepaintState = Hitbox;

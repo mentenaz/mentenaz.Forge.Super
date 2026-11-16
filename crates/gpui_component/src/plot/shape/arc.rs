@@ -73,7 +73,7 @@ impl Arc {
         inner_radius: Option<f32>,
         outer_radius: Option<f32>,
         bounds: &Bounds<Pixels>,
-    ) -> Option<Path<Pixels>> {
+    ) -> Option<Path> {
         let start_angle = arc.start_angle - HALF_PI;
         let end_angle = arc.end_angle - HALF_PI;
         let da = end_angle - start_angle;

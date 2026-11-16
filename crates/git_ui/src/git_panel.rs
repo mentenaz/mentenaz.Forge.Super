@@ -1323,6 +1323,26 @@ struct GitPanelContextMenu {
     _subscription: Subscription,
 }
 
+/// The label for `repository`, disambiguated against every other repository in
+/// the project.
+fn repository_display_name(
+    repository: Option<&Entity<Repository>>,
+    project: &Entity<Project>,
+    cx: &App,
+) -> SharedString {
+    let Some(repository) = repository else {
+        return SharedString::default();
+    };
+    let id = repository.read(cx).id;
+    project
+        .read(cx)
+        .git_store()
+        .read(cx)
+        .display_names(cx)
+        .remove(&id)
+        .unwrap_or_else(|| repository.read(cx).display_name())
+}
+
 pub struct GitPanel {
     pub(crate) active_repository: Option<Entity<Repository>>,
     pub(crate) commit_editor: Entity<Editor>,
@@ -1574,6 +1594,8 @@ impl GitPanel {
             let mut was_folder_indicator = GitPanelSettings::get_global(cx).folder_indicator;
             let mut was_diff_stats = GitPanelSettings::get_global(cx).diff_stats;
             let mut was_commit_editor = GitPanelSettings::get_global(cx).commit_editor;
+            let mut was_date_style = GitPanelSettings::get_global(cx).date_style;
+            let mut was_date_format = ProjectSettings::get_global(cx).git.date_format.clone();
             cx.observe_global_in::<SettingsStore>(window, move |this, window, cx| {
                 let settings = GitPanelSettings::get_global(cx);
                 let sort_by = settings.sort_by;
@@ -1583,6 +1605,8 @@ impl GitPanel {
                 let folder_indicator = settings.folder_indicator;
                 let diff_stats = settings.diff_stats;
                 let commit_editor = settings.commit_editor;
+                let date_style = settings.date_style;
+                let date_format = ProjectSettings::get_global(cx).git.date_format.clone();
                 // Changing the setting is an explicit request, so it wins over
                 // whatever this workspace last persisted.
                 if commit_editor != was_commit_editor {
@@ -1616,7 +1640,11 @@ impl GitPanel {
                 if (diff_stats != was_diff_stats) || update_entries {
                     this.update_visible_entries(window, cx);
                 }
-                if file_icons != was_file_icons || folder_indicator != was_folder_indicator {
+                if file_icons != was_file_icons
+                    || folder_indicator != was_folder_indicator
+                    || date_style != was_date_style
+                    || date_format != was_date_format
+                {
                     cx.notify();
                 }
                 was_sort_by = sort_by;
@@ -1626,6 +1654,8 @@ impl GitPanel {
                 was_folder_indicator = folder_indicator;
                 was_diff_stats = diff_stats;
                 was_commit_editor = commit_editor;
+                was_date_style = date_style;
+                was_date_format = date_format;
             })
             .detach();
 
@@ -5611,7 +5641,7 @@ impl GitPanel {
                     .clone()
                     .or_else(|| participant.user.name.clone())
                     .unwrap_or_else(|| participant.user.username.clone().to_string());
-                new_co_authors.push((name.clone(), email.clone()))
+                new_co_authors.push((name, email.clone()))
             }
         }
         if !project.is_local()
@@ -7411,12 +7441,7 @@ impl GitPanel {
         let head_commit = active_repository.read(cx).head_commit.clone();
 
         let git_panel = cx.entity();
-        let display_name = SharedString::from(Arc::from(
-            active_repository
-                .read(cx)
-                .display_name()
-                .trim_end_matches("/"),
-        ));
+        let display_name = repository_display_name(Some(&active_repository), &self.project, cx);
         let editor_is_long = self.commit_editor.update(cx, |editor, cx| {
             editor.max_point(cx).row().0 >= MAX_PANEL_EDITOR_LINES as u32
         });
@@ -7747,8 +7772,7 @@ impl GitPanel {
                                     commit.sha.to_string(),
                                     repo.clone(),
                                     workspace.clone(),
-                                    None,
-                                    None,
+                                    Default::default(),
                                     window,
                                     cx,
                                 );
@@ -8212,8 +8236,7 @@ impl GitPanel {
             entry.sha.to_string(),
             active_repository.downgrade(),
             self.workspace.clone(),
-            None,
-            None,
+            Default::default(),
             window,
             cx,
         );
@@ -8333,6 +8356,10 @@ impl GitPanel {
     }
 
     fn preload_commit_history(&mut self, cx: &mut Context<Self>) {
+        if !self.project.read(cx).is_local() {
+            return;
+        }
+
         let Some(active_repository) = self.active_repository.as_ref() else {
             return;
         };
@@ -8489,10 +8516,7 @@ impl GitPanel {
                         let repo_weak = repo_weak;
                         let git_panel = cx.weak_entity();
                         move |range, window, cx| {
-                            let local_offset = time::UtcOffset::current_local_offset()
-                                .unwrap_or(time::UtcOffset::UTC);
-                            let now = time::OffsetDateTime::now_utc();
-
+                            let date_style = GitPanelSettings::get_global(cx).date_style;
                             let visible_data: Vec<Option<Arc<CommitData>>> = repo_weak
                                 .update(cx, |repository, cx| {
                                     entries[range.clone()]
@@ -8535,16 +8559,13 @@ impl GitPanel {
                                         None => ("Loading…".into(), "".into(), None, None),
                                     };
 
-                                    let relative_time: SharedString = timestamp
+                                    let formatted_time: SharedString = timestamp
                                         .and_then(|ts| {
                                             time::OffsetDateTime::from_unix_timestamp(ts).ok()
                                         })
                                         .map(|dt| {
-                                            time_format::format_localized_timestamp(
-                                                dt,
-                                                now,
-                                                local_offset,
-                                                time_format::TimestampFormat::Relative,
+                                            crate::git_timestamp::format_git_date(
+                                                dt, date_style, cx,
                                             )
                                             .into()
                                         })
@@ -8696,9 +8717,9 @@ impl GitPanel {
                                                     )
                                                     .child(dot_separator())
                                                 })
-                                                .when(!relative_time.is_empty(), |this| {
+                                                .when(!formatted_time.is_empty(), |this| {
                                                     this.child(
-                                                        Label::new(relative_time)
+                                                        Label::new(formatted_time)
                                                             .size(LabelSize::Small)
                                                             .color(Color::Muted)
                                                             .flex_none(),
@@ -8764,8 +8785,7 @@ impl GitPanel {
                                                 sha_for_click.clone(),
                                                 repo.clone(),
                                                 workspace.clone(),
-                                                None,
-                                                None,
+                                                Default::default(),
                                                 window,
                                                 cx,
                                             );
@@ -9709,7 +9729,13 @@ impl GitPanel {
             .bg(base_bg)
             .hover(|s| s.bg(hover_bg))
             .active(|s| s.bg(active_bg))
-            .child(name_row)
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .flex_1()
+                    .overflow_hidden()
+                    .child(name_row),
+            )
             .when(GitPanelSettings::get_global(cx).diff_stats, |el| {
                 el.when_some(entry.diff_stat, move |this, stat| {
                     let id = format!("diff-stat-{}", id_for_diff_stat);
@@ -10291,6 +10317,13 @@ impl GitPanel {
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         Self::new(workspace, window, cx)
+    }
+
+    pub fn commit_history_shas(&self) -> Vec<Oid> {
+        self.commit_history_entries()
+            .iter()
+            .map(|entry| entry.sha)
+            .collect()
     }
 
     pub fn active_repository(&self) -> Option<&Entity<Repository>> {
@@ -12034,8 +12067,7 @@ mod tests {
                     sha.to_string(),
                     repository.downgrade(),
                     workspace,
-                    None,
-                    None,
+                    Default::default(),
                     window,
                     cx,
                 );

@@ -108,7 +108,7 @@ impl<M: InputModeKind> TextElement<M> {
         last_layout: &LastLayout,
         text_style: &TextStyle,
         window: &mut Window,
-    ) -> Option<Path<Pixels>> {
+    ) -> Option<Path> {
         if !state.is_multi_line() || !state.mode.has_indent_guides() {
             return None;
         }
