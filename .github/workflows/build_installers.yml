@@ -326,7 +326,9 @@ jobs:
     # explicit argument specifically for this — release.yml's own
     # bundle_mac_x86_64 job does the same from the same runner type).
     runs-on: macos-26
-    timeout-minutes: 120
+    # A cold build here has no cache and a 3-core runner: Windows and Linux take
+    # about 90 to 100 minutes even with one, so 120 would stop it mid-compile.
+    timeout-minutes: 180
     # Disabled by default on tag push (see prepare's build_macos output) —
     # webrtc-sys failed to build on macos-14 with "implicit instantiation of
     # undefined template std::__pointer_traits_element_type<rust::Slice<...>::
