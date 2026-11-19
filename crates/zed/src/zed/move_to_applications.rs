@@ -74,7 +74,7 @@ impl MoveToApplicationsRequest {
         let response = cx
             .prompt(
                 PromptLevel::Info,
-                format!("Move {brand} to Applications?"),
+                &format!("Move {brand} to Applications?"),
                 Some(
                     format!(
                         "{brand} is running from a temporary location. Move it to Applications to finish installing it."
@@ -107,7 +107,7 @@ impl MoveToApplicationsRequest {
                         .ok();
                     cx.prompt(
                         PromptLevel::Critical,
-                        format!("Failed to move {brand} to Applications"),
+                        &format!("Failed to move {brand} to Applications"),
                         Some(&error.to_string()),
                         &["OK"],
                     )
