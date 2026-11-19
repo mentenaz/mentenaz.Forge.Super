@@ -53,6 +53,14 @@ on:
         required: false
         type: boolean
         default: true
+      macos_check_only:
+        description: >-
+          macOS only: type-check zed, cli and remote_server instead of building the
+          .dmg (no link, no bundle, nothing uploaded or published). Much faster; use
+          it to find macOS-only compile errors, then run once without it.
+        required: false
+        type: boolean
+        default: false
       publish_release:
         description: >-
           Publish every platform built to one shared GitHub Release (tag
@@ -92,6 +100,7 @@ jobs:
       build_windows: ${{ steps.resolve.outputs.build_windows }}
       build_linux: ${{ steps.resolve.outputs.build_linux }}
       build_macos: ${{ steps.resolve.outputs.build_macos }}
+      macos_check_only: ${{ steps.resolve.outputs.macos_check_only }}
       publish_release: ${{ steps.resolve.outputs.publish_release }}
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       build_number: ${{ steps.resolve.outputs.build_number }}
@@ -111,6 +120,7 @@ jobs:
             # 15.0.1 didn't avoid it either). Still available manually via
             # workflow_dispatch's build_macos input if you want to retry.
             echo "build_macos=false" >> "$GITHUB_OUTPUT"
+            echo "macos_check_only=false" >> "$GITHUB_OUTPUT"
             echo "publish_release=true" >> "$GITHUB_OUTPUT"
             echo "release_tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
             # dev-v38 -> 38: the fourth part of the installer version
@@ -125,7 +135,11 @@ jobs:
             echo "build_windows=${{ inputs.build_windows }}" >> "$GITHUB_OUTPUT"
             echo "build_linux=${{ inputs.build_linux }}" >> "$GITHUB_OUTPUT"
             echo "build_macos=${{ inputs.build_macos }}" >> "$GITHUB_OUTPUT"
-            echo "publish_release=${{ inputs.publish_release }}" >> "$GITHUB_OUTPUT"
+            echo "macos_check_only=${{ inputs.macos_check_only }}" >> "$GITHUB_OUTPUT"
+            # A check-only macOS run has no .dmg, so there is nothing to publish.
+            publish_release="${{ inputs.publish_release }}"
+            if [ "${{ inputs.macos_check_only }}" = "true" ]; then publish_release=false; fi
+            echo "publish_release=$publish_release" >> "$GITHUB_OUTPUT"
             echo "release_tag=dev-build" >> "$GITHUB_OUTPUT"
             # Untagged test builds: lower than any tagged release.
             echo "build_number=0" >> "$GITHUB_OUTPUT"
@@ -370,7 +384,18 @@ jobs:
       # — right-click the app -> Open (instead of double-clicking), or
       # `xattr -cr /Applications/Zed*.app` after copying it over. Expected
       # for an unsigned build, not a build failure.
+      # macos_check_only: type-check only, see script/bundle-mac -c.
+      - name: Check macOS-only code (script/bundle-mac -c)
+        if: ${{ needs.prepare.outputs.macos_check_only == 'true' }}
+        run: |
+          triple="aarch64-apple-darwin"
+          if [ "${{ needs.prepare.outputs.architecture }}" = "x86_64" ]; then
+            triple="x86_64-apple-darwin"
+          fi
+          ./script/bundle-mac -c "$triple"
+
       - name: Build the bundle (script/bundle-mac)
+        if: ${{ needs.prepare.outputs.macos_check_only != 'true' }}
         run: |
           triple="aarch64-apple-darwin"
           if [ "${{ needs.prepare.outputs.architecture }}" = "x86_64" ]; then
@@ -379,6 +404,7 @@ jobs:
           ./script/bundle-mac "$triple"
 
       - name: Upload artifact
+        if: ${{ needs.prepare.outputs.macos_check_only != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: Zed-${{ needs.prepare.outputs.architecture }}.dmg
