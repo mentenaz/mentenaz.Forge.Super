@@ -325,23 +325,17 @@ jobs:
     # it out of the box; script/bundle-mac takes the target triple as an
     # explicit argument specifically for this — release.yml's own
     # bundle_mac_x86_64 job does the same from the same runner type).
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 120
     # Disabled by default on tag push (see prepare's build_macos output) —
-    # webrtc-sys fails to build with "implicit instantiation of undefined
-    # template std::__pointer_traits_element_type<rust::Slice<...>::iterator>"
-    # (cxx-rs's generated rust::Slice<T>::iterator doesn't satisfy the C++20
-    # `contiguous_iterator` concept libc++ checks for, at -std=c++20 per
-    # webrtc-sys's own build.rs). Pinning DEVELOPER_DIR to Xcode 15.0.1
-    # below did NOT fix it — still fails the same way — so this is left
-    # pinned only as a documented starting point for whoever revisits this;
-    # it is not a working fix. Likely needs an upstream cxx-rs/livekit-rust-sdks
-    # fix, or building webrtc-sys at -std=c++17 instead (requires patching
-    # the vendored build.rs via a Cargo [patch] fork, not done here). Bump
-    # this once the pinned livekit-rust-sdks rev (see root Cargo.toml) picks
-    # up an upstream cxx-rs fix.
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_15.0.1.app/Contents/Developer
+    # webrtc-sys failed to build on macos-14 with "implicit instantiation of
+    # undefined template std::__pointer_traits_element_type<rust::Slice<...>::
+    # iterator>" (cxx-rs's generated rust::Slice<T>::iterator does not satisfy
+    # the C++20 `contiguous_iterator` concept that Xcode 15's libc++ checks);
+    # pinning Xcode 15.0.1 did not avoid it. macos-14 is retired now, and
+    # upstream Zed builds with Xcode 26, so this builds on macos-26 with the
+    # runner's own Xcode 26: no DEVELOPER_DIR pin (that Xcode 15 path does not
+    # exist on this image). Under test; see the run history for the result.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
