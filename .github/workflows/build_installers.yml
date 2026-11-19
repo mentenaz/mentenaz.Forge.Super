@@ -101,6 +101,7 @@ jobs:
       build_linux: ${{ steps.resolve.outputs.build_linux }}
       build_macos: ${{ steps.resolve.outputs.build_macos }}
       macos_check_only: ${{ steps.resolve.outputs.macos_check_only }}
+      macos_archs: ${{ steps.resolve.outputs.macos_archs }}
       publish_release: ${{ steps.resolve.outputs.publish_release }}
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       build_number: ${{ steps.resolve.outputs.build_number }}
@@ -113,14 +114,13 @@ jobs:
             echo "architecture=x86_64" >> "$GITHUB_OUTPUT"
             echo "build_windows=true" >> "$GITHUB_OUTPUT"
             echo "build_linux=true" >> "$GITHUB_OUTPUT"
-            # Disabled on tag push: webrtc-sys fails to build against every
-            # Xcode on the macos-14 runner we've tried so far (15.4's libc++
-            # tightened a C++20 concept check that cxx-rs's generated
-            # rust::Slice<T>::iterator doesn't satisfy; pinning back to
-            # 15.0.1 didn't avoid it either). Still available manually via
-            # workflow_dispatch's build_macos input if you want to retry.
-            echo "build_macos=false" >> "$GITHUB_OUTPUT"
+            # macOS builds on macos-26 with Xcode 26, where webrtc-sys compiles
+            # (it did not on macos-14's Xcode 15). Both Apple Silicon and Intel
+            # are built, since most Macs are Apple Silicon; the Windows and Linux
+            # builds are x86_64 only.
+            echo "build_macos=true" >> "$GITHUB_OUTPUT"
             echo "macos_check_only=false" >> "$GITHUB_OUTPUT"
+            echo 'macos_archs=["aarch64","x86_64"]' >> "$GITHUB_OUTPUT"
             echo "publish_release=true" >> "$GITHUB_OUTPUT"
             echo "release_tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
             # dev-v38 -> 38: the fourth part of the installer version
@@ -136,6 +136,7 @@ jobs:
             echo "build_linux=${{ inputs.build_linux }}" >> "$GITHUB_OUTPUT"
             echo "build_macos=${{ inputs.build_macos }}" >> "$GITHUB_OUTPUT"
             echo "macos_check_only=${{ inputs.macos_check_only }}" >> "$GITHUB_OUTPUT"
+            echo 'macos_archs=["${{ inputs.architecture }}"]' >> "$GITHUB_OUTPUT"
             # A check-only macOS run has no .dmg, so there is nothing to publish.
             publish_release="${{ inputs.publish_release }}"
             if [ "${{ inputs.macos_check_only }}" = "true" ]; then publish_release=false; fi
@@ -334,6 +335,10 @@ jobs:
   build_macos:
     needs: prepare
     if: ${{ needs.prepare.outputs.build_macos == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.prepare.outputs.macos_archs) }}
     # Apple Silicon runner — GitHub retired Intel-hosted macOS images, so
     # the x86_64 build cross-compiles from here (rustc/Xcode both support
     # it out of the box; script/bundle-mac takes the target triple as an
@@ -343,7 +348,6 @@ jobs:
     # A cold build here has no cache and a 3-core runner: Windows and Linux take
     # about 90 to 100 minutes even with one, so 120 would stop it mid-compile.
     timeout-minutes: 180
-    # Disabled by default on tag push (see prepare's build_macos output) —
     # webrtc-sys failed to build on macos-14 with "implicit instantiation of
     # undefined template std::__pointer_traits_element_type<rust::Slice<...>::
     # iterator>" (cxx-rs's generated rust::Slice<T>::iterator does not satisfy
@@ -351,7 +355,7 @@ jobs:
     # pinning Xcode 15.0.1 did not avoid it. macos-14 is retired now, and
     # upstream Zed builds with Xcode 26, so this builds on macos-26 with the
     # runner's own Xcode 26: no DEVELOPER_DIR pin (that Xcode 15 path does not
-    # exist on this image). Under test; see the run history for the result.
+    # exist on this image). The compile is checked; the bundling steps are new.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -362,6 +366,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          # One cache per architecture, or the two matrix jobs race to save one.
+          key: ${{ matrix.arch }}
 
       # dmg-license (script/bundle-mac embeds a license agreement into the
       # DMG) is an npm package — pin a version rather than trust whatever
@@ -388,27 +394,19 @@ jobs:
       - name: Check macOS-only code (script/bundle-mac -c)
         if: ${{ needs.prepare.outputs.macos_check_only == 'true' }}
         run: |
-          triple="aarch64-apple-darwin"
-          if [ "${{ needs.prepare.outputs.architecture }}" = "x86_64" ]; then
-            triple="x86_64-apple-darwin"
-          fi
-          ./script/bundle-mac -c "$triple"
+          ./script/bundle-mac -c "${{ matrix.arch }}-apple-darwin"
 
       - name: Build the bundle (script/bundle-mac)
         if: ${{ needs.prepare.outputs.macos_check_only != 'true' }}
         run: |
-          triple="aarch64-apple-darwin"
-          if [ "${{ needs.prepare.outputs.architecture }}" = "x86_64" ]; then
-            triple="x86_64-apple-darwin"
-          fi
-          ./script/bundle-mac "$triple"
+          ./script/bundle-mac "${{ matrix.arch }}-apple-darwin"
 
       - name: Upload artifact
         if: ${{ needs.prepare.outputs.macos_check_only != 'true' }}
         uses: actions/upload-artifact@v4
         with:
-          name: Zed-${{ needs.prepare.outputs.architecture }}.dmg
-          path: target/${{ needs.prepare.outputs.architecture == 'x86_64' && 'x86_64-apple-darwin' || 'aarch64-apple-darwin' }}/release/Zed-${{ needs.prepare.outputs.architecture }}.dmg
+          name: macos-dmg-${{ matrix.arch }}
+          path: target/${{ matrix.arch }}-apple-darwin/release/Mentenaz-Forge-Super-${{ matrix.arch }}.dmg
           if-no-files-found: error
 
   publish_release:
@@ -443,12 +441,16 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Download macOS artifact
-        if: ${{ needs.build_macos.result == 'success' }}
+      # One disk image per architecture. The matrix job's result is a failure if
+      # either arch failed, so take whichever were built rather than all-or-nothing.
+      - name: Download macOS artifacts
+        if: ${{ needs.build_macos.result != 'skipped' }}
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          name: Zed-${{ needs.prepare.outputs.architecture }}.dmg
+          pattern: macos-dmg-*
           path: dist
+          merge-multiple: true
 
       # Signed SLSA build provenance for every file about to be published,
       # so anyone can check a download was built by this workflow from this
@@ -536,9 +538,12 @@ jobs:
           >
           > - **Windows:** SmartScreen warns on first run ("Windows protected your
           >   PC") — choose **More info** then **Run anyway**.
-          > - **macOS:** Gatekeeper blocks the first open — right-click the app and
-          >   choose **Open**, or run \`xattr -cr /Applications/Zed*.app\` after
-          >   copying it over.
+          > - **macOS:** Gatekeeper blocks the first open. Open **System Settings**,
+          >   **Privacy & Security** and choose **Open Anyway** (on older macOS:
+          >   right-click the app and choose **Open**), or run
+          >   \`xattr -cr "/Applications/Mentenaz Forge Super.app"\` after copying it
+          >   over. Pick the **aarch64** disk image for Apple Silicon Macs, **x86_64**
+          >   for Intel.
           > - **Linux:** an unsigned \`.tar.gz\` and \`.deb\`.
 
           **Check a download** was built by this repository's workflow and not
