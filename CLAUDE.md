@@ -117,10 +117,17 @@ the latest `dev-v*` tag, and a message of the form
 - The `N` in the tag is the fourth part of the installer version
   (`1.27.0.N`), which winget and Windows compare, so tag numbers must only
   go up. `RELEASE_VERSION` stays the crate version.
-- Tag builds are Windows-only until the Linux packaging (`bundle-linux`,
-  `bundle-deb`) is renamed to Forge Super; macOS is off because webrtc-sys
-  fails to build there. Both can still be run manually from the Actions tab,
-  and manual runs publish a "dev-build" pre-release.
+- Tag builds cover Windows, Linux (`.deb`, `.tar.gz`, apt edge) and macOS
+  (`Mentenaz-Forge-Super-aarch64.dmg` and `-x86_64.dmg`). macOS builds on
+  `macos-26` with Xcode 26 and is only ad-hoc signed, as there is no Apple
+  Developer account, so Gatekeeper warns on first open. Any platform can also
+  be run by hand from the Actions tab; a manual run publishes a "dev-build"
+  pre-release only if `publish_release` is ticked.
+- GitHub often cancels the macOS jobs after 15 minutes with "not acquired by
+  Runner" (no free Apple runner). That is not a build error: once the whole
+  run has finished, re-run just those with `gh run rerun <id> --failed`.
+  `script/bundle-mac -c` (workflow input `macos_check_only`) only type-checks,
+  which finds macOS-only compile errors much faster than a full bundle.
 - A new tag push cancels a `build_installers` run still in progress, so
   wait for it to finish first. Pushes to `main` alone do not start a build.
 - Pushing needs the `mentenaz` GitHub account active (`gh auth switch -u
