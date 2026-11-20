@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+
+# Uploads the apt repository that script/publish-apt-repo built (by default
+# ~/.aptly/public) to the downloads server over SSH.
+#
+# The server has ssh and tar but no rsync, so this is an incremental upload
+# done with tar over ssh:
+#
+#   1. pool/      only the packages the server does not have yet (or has with a
+#                 different size). A package's file name carries its version,
+#                 so a published one never changes, and 600 MB is not re-sent
+#                 on every release.
+#   2. root files mentenaz.gpg and install.sh.
+#   3. dists/     last, and swapped in with two renames, so apt never reads an
+#                 index that points at a package which has not arrived yet.
+#
+# Nothing is ever deleted from the server except the old dists/ it replaces:
+# the folder also holds files that are not ours (cgi-bin, forge-scaffold,
+# php.ini).
+#
+# The host key below is the server's public ed25519 key
+# (SHA256:sidusN7ytwdejwMac77aKk9aYwajP0mgqmaAos9E+ZQ). ssh refuses any other
+# server, so if the host is reinstalled this fails closed and the new key has
+# to be pinned here. Only the private key is secret.
+#
+# Environment:
+#   APT_SSH_KEY       the private key, as text (required unless APT_SSH_KEY_FILE is set)
+#   APT_SSH_KEY_FILE  a private key file, for running this by hand
+#   APT_SSH_HOST / APT_SSH_PORT / APT_SSH_USER / APT_SSH_PATH   where to upload
+#   APTLY_PUBLIC_DIR  the tree to upload (default ~/.aptly/public)
+#   APT_DEPLOY_DRY_RUN=1   only say what would be sent
+
+set -euo pipefail
+
+APT_SSH_HOST="${APT_SSH_HOST:-downloads.mentenaz-server.com}"
+APT_SSH_PORT="${APT_SSH_PORT:-24}"
+APT_SSH_USER="${APT_SSH_USER:-mentefpu}"
+APT_SSH_PATH="${APT_SSH_PATH:-/home/mentefpu/downloads.mentenaz-server.com}"
+HOST_KEY='[downloads.mentenaz-server.com]:24 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEaP/0qV5NeAJcIVmPpQKJhRRa8QRoUcS+V2cBvx4I6g'
+local_dir="${APTLY_PUBLIC_DIR:-$HOME/.aptly/public}"
+
+die() {
+    printf 'deploy-apt-ssh: %s\n' "$*" >&2
+    exit 1
+}
+
+[ -d "$local_dir/dists" ] && [ -d "$local_dir/pool" ] || die "$local_dir has no dists/ and pool/"
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+if [ -n "${APT_SSH_KEY_FILE:-}" ]; then
+    cp "$APT_SSH_KEY_FILE" "$work/key"
+elif [ -n "${APT_SSH_KEY:-}" ]; then
+    # A key saved on Windows can carry CRLF line endings, which ssh rejects.
+    printf '%s\n' "$APT_SSH_KEY" | tr -d '\r' > "$work/key"
+else
+    die "set APT_SSH_KEY (or APT_SSH_KEY_FILE)"
+fi
+chmod 600 "$work/key"
+printf '%s\n' "$HOST_KEY" > "$work/known_hosts"
+
+# The server only accepts the hmac-sha2-256 MAC.
+ssh_opts=(
+    -i "$work/key" -p "$APT_SSH_PORT"
+    -o MACs=hmac-sha2-256
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$work/known_hosts"
+    -o BatchMode=yes -o IdentitiesOnly=yes
+    -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=8
+)
+remote() { ssh "${ssh_opts[@]}" "$APT_SSH_USER@$APT_SSH_HOST" "$@"; }
+q="$(printf '%q' "$APT_SSH_PATH")"
+
+echo "Checking the login to $APT_SSH_USER@$APT_SSH_HOST:$APT_SSH_PORT"
+remote "true" || die "could not log in to the downloads server"
+
+cd "$local_dir"
+
+# What each side has in pool/, as "path<TAB>size", sorted the same way so comm
+# can compare them. A missing pool/ on the server is simply an empty list.
+list_remote_pool() {
+    remote "cd $q 2>/dev/null && { find pool -type f -printf '%p\t%s\n' 2>/dev/null || true; }" | LC_ALL=C sort
+}
+find pool -type f -printf '%p\t%s\n' | LC_ALL=C sort > "$work/local-pool"
+list_remote_pool > "$work/remote-pool"
+comm -23 "$work/local-pool" "$work/remote-pool" | cut -f1 > "$work/send"
+echo "pool/: $(wc -l < "$work/local-pool") packages here, $(wc -l < "$work/remote-pool") there, $(wc -l < "$work/send") to send"
+
+find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$work/root-files"
+
+if [ "${APT_DEPLOY_DRY_RUN:-}" = "1" ]; then
+    echo "Dry run. Would send:"
+    sed 's/^/  /' "$work/send"
+    sed 's/^/  /' "$work/root-files"
+    echo "  dists/ (replaced as a whole)"
+    exit 0
+fi
+
+remote "mkdir -p $q"
+
+if [ -s "$work/send" ]; then
+    tar -cf - -T "$work/send" | remote "cd $q && tar -xf -"
+fi
+
+if [ -s "$work/root-files" ]; then
+    tar -cf - -T "$work/root-files" | remote "cd $q && tar -xf -"
+fi
+
+# dists/ last, then two renames to swap it in.
+tar -cf - dists | remote "cd $q && rm -rf dists.incoming && mkdir dists.incoming && tar -xf - -C dists.incoming --strip-components=1"
+remote "cd $q && rm -rf dists.old && { [ ! -d dists ] || mv dists dists.old; } && mv dists.incoming dists && rm -rf dists.old"
+
+# Every package here must now be there, at the same size, and both indexes
+# must exist.
+list_remote_pool > "$work/remote-pool-after"
+missing="$(comm -23 "$work/local-pool" "$work/remote-pool-after" | cut -f1)"
+if [ -n "$missing" ]; then
+    printf 'deploy-apt-ssh: still missing or the wrong size on the server:\n%s\n' "$missing" >&2
+    exit 1
+fi
+remote "cd $q && test -s dists/edge/Release && test -s dists/stable/Release" || die "the server has no dists/*/Release after the upload"
+
+echo "Deployed $(wc -l < "$work/send") new package(s); dists/ replaced."

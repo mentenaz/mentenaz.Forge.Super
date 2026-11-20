@@ -59,7 +59,18 @@ jobs:
 
           ./script/publish-apt-repo --stable-tag "$TAG"
 
-      - name: Deploy the apt repository to downloads.mentenaz-server.com
+      # Uploaded over SSH with tar (script/deploy-apt-ssh): only the packages the
+      # server lacks are sent. If that fails for any reason, the FTPS upload
+      # below runs instead, so a release is not held up by the new route.
+      - name: Deploy the apt repository over SSH
+        id: ssh_deploy
+        continue-on-error: true
+        env:
+          APT_SSH_KEY: ${{ secrets.APT_SSH_KEY }}
+        run: bash script/deploy-apt-ssh
+
+      - name: Deploy the apt repository over FTPS (fallback)
+        if: ${{ steps.ssh_deploy.outcome != 'success' }}
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.AFRIHOST_FTP_HOST }}
