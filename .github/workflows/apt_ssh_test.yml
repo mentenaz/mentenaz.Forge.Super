@@ -1,0 +1,47 @@
+# Checks that GitHub's build machines can log in to the downloads server over
+# SSH with the deploy key, before the apt upload is moved off FTPS. Run by
+# hand from the Actions tab; it changes nothing on the server.
+#
+# The server only accepts the hmac-sha2-256 MAC, so every ssh call here (and
+# in the real deploy) passes it. The host key below is the server's public
+# ed25519 key (SHA256:sidusN7ytwdejwMac77aKk9aYwajP0mgqmaAos9E+ZQ); the build
+# machine refuses to connect to anything else. Only the private key is secret.
+name: apt_ssh_test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      APT_SSH_HOST: downloads.mentenaz-server.com
+      APT_SSH_PORT: "24"
+      APT_SSH_USER: mentefpu
+      APT_SSH_PATH: /home/mentefpu/downloads.mentenaz-server.com
+    steps:
+      - name: Install the deploy key and the pinned host key
+        env:
+          SSH_KEY: ${{ secrets.APT_SSH_KEY }}
+        run: |
+          if [ -z "$SSH_KEY" ]; then
+            echo "::error::The APT_SSH_KEY secret is not set."
+            exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          # A key saved on Windows can carry CRLF line endings, which ssh rejects.
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/apt_deploy
+          chmod 600 ~/.ssh/apt_deploy
+          echo '[downloads.mentenaz-server.com]:24 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEaP/0qV5NeAJcIVmPpQKJhRRa8QRoUcS+V2cBvx4I6g' > ~/.ssh/known_hosts
+
+      - name: Log in and look at the apt folder
+        run: |
+          ssh -i ~/.ssh/apt_deploy -p "$APT_SSH_PORT" \
+            -o MACs=hmac-sha2-256 -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes -o ConnectTimeout=20 \
+            "$APT_SSH_USER@$APT_SSH_HOST" \
+            "cd $APT_SSH_PATH && pwd && ls && ls dists && which tar && du -sh pool dists"
