@@ -1,4 +1,4 @@
-.rules
+AGENTS.md
 
 # Cockpit panel ports: `gpui_component` is the requirement, not an option
 
