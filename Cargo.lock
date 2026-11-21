@@ -24811,6 +24811,7 @@ dependencies = [
  "futures-lite 2.6.1",
  "git",
  "gpui",
+ "gpui-component",
  "http_client",
  "itertools 0.14.0",
  "language",
