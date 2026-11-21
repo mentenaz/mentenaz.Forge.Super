@@ -1,831 +1,216 @@
-# Mentenaz Forge — Zed Developer Cockpit
+# Mentenaz Forge Super
 
-> **An experimental developer cockpit built directly into Zed — exploring what happens when the tools surrounding the editor become part of the editor itself.**
+[![Latest release](https://img.shields.io/github/v/release/mentenaz/mentenaz.Forge.Super?label=release)](https://github.com/mentenaz/mentenaz.Forge.Super/releases/latest)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](#license)
 
-![Mentenaz Forge](docs/screenshots/Forge_Workspace.png)
+> **A developer cockpit built directly into the Zed editor: databases, GitHub, package managers, runtimes, visual workflows and system monitoring as native parts of the workspace, written in Rust and GPUI.**
 
-Mentenaz Forge is a personal research fork of [Zed](https://github.com/zed-industries/zed) exploring a broader developer environment built on **Rust and GPUI**.
+![Mentenaz Forge Super](docs/screenshots/Forge_Workspace.png)
 
-The project brings together project environments, package management, databases, visual workflows, GitHub, Git insights, process monitoring and system health as native parts of the Zed workspace.
+Mentenaz Forge Super is a fork of the [Zed](https://github.com/zed-industries/zed) editor. It keeps Zed's editor and adds the tools that normally live in separate applications (a database client, a GitHub client, package managers, a process monitor, a workflow engine) as panels inside the same window.
 
-This is **not a collection of mock panels or a UI-only prototype**.
+It is made by Francois Huyzers ([@mentenaz](https://github.com/mentenaz)). It is **not affiliated with, endorsed by, or associated with Zed Industries.**
 
-The systems described here are implemented as working Rust/GPUI components and integrated into Zed's existing application and workspace architecture.
-
-> **Important:** This is an unofficial personal fork and is **not affiliated with, endorsed by, or associated with Zed Industries.**
-
----
-
-# What I Built
-
-Forge explores what a developer environment could look like when the tooling normally scattered across separate applications becomes part of the editor.
-
-| Area                         | What Forge explores                                           |
-| ---------------------------- | ------------------------------------------------------------- |
-| **Developer Cockpit**        | Central operational view of the development environment       |
-| **Visual Workflow Engine**   | Executable visual workflows with branching and error handling |
-| **Database Workbench**       | SQLite, PostgreSQL, MySQL and MSSQL in one workspace          |
-| **Runtime Management**       | Node, .NET, Python and Rust project tooling                   |
-| **Package Management**       | npm, NuGet, pip and Cargo package workflows                   |
-| **Rust / Cargo Manager**     | crates.io search, outdated deps and OSV advisories            |
-| **GitHub / Helm**            | Native GitHub client and repository Workspace browsing        |
-| **Git Insights**             | Repository activity, changed files and collaborators          |
-| **Dashboard**                | Project, dependency, Git and system health                    |
-| **Process Monitor**          | CPU, RAM, disk, network and process management                |
-| **SQL Language Server**      | Experimental native SQL tooling                               |
-| **Designer / Script Runner** | Additional development utilities                              |
-| **GPUI Extensions**          | Zoom, pan and fit-view support for visual tooling             |
-
-The important part isn't the number of features.
-
-**It is that these systems are implemented as native Rust/GPUI components and integrated into the existing Zed workspace architecture.**
+| | |
+| --- | --- |
+| **What it is** | A fork of Zed 1.30 with a developer cockpit added |
+| **Built with** | Rust and GPUI |
+| **Platforms** | Windows (x86_64), Linux (Debian, Ubuntu, Kali; amd64), macOS (Apple Silicon and Intel) |
+| **Cost and accounts** | Free. No account, no sign-in, no usage data sent |
+| **License** | GPL-3.0-or-later |
+| **Status** | Experimental. Developed and tested mainly on Windows; Linux and macOS are newer. See [Status](#status) |
+| **Website and docs** | <https://forge.mentenaz-server.com> |
 
 ---
 
-# A Look Inside Forge
+## Download and install
 
-The best way to understand the project is to see it running.
+Every release is on the [releases page](https://github.com/mentenaz/mentenaz.Forge.Super/releases/latest). Builds are named `dev-vN` (for example `dev-v59`), and the installer version is `1.30.0.N`.
 
-These screenshots are an **inside look at the actual development environment**, rather than concept art or static product mockups.
+**The builds are not code-signed yet**, so each system warns the first time you open one. The steps are below.
 
----
+### Windows
 
-## Developer Cockpit
+Download `Mentenaz-Forge-Super-x86_64.exe` and run it. It installs into your user profile and does not need administrator rights.
 
-The Cockpit is the central operational surface for Forge.
+Windows SmartScreen may say "Windows protected your PC". Choose **More info**, then **Run anyway**.
 
-It brings together information about the project, development environment and machine into a single workspace.
+### Linux (Debian, Ubuntu, Kali)
 
-![Forge Cockpit](docs/screenshots/Cockpit.png)
+```sh
+curl -fsSL https://downloads.mentenaz-server.com/install.sh | sudo sh
+```
 
-The idea is to make the development environment something that can be **observed and operated**, rather than simply used as a place to edit files.
+This registers the Mentenaz package repository (its signing key is checked against a fingerprint built into the script) and installs the `forge-super` package. Then start it with `forge-super`. Updates arrive with `sudo apt-get update && sudo apt-get upgrade`.
 
----
+The repository has two channels. **stable** (the default) only receives a build after it has been tried; **edge** gets every build as soon as it is made (`... | sudo sh -s -- --edge`).
 
-## Dashboard
+A `.deb` and a `.tar.gz` are also on every release.
 
-The Dashboard provides a higher-level view of the current development environment.
+### macOS
 
-![Forge Dashboard](docs/screenshots/DashBoard.png)
+macOS support is new and has had very little testing on real Macs. Pick the disk image for your Mac: `Mentenaz-Forge-Super-aarch64.dmg` for Apple Silicon (M1 or newer), `Mentenaz-Forge-Super-x86_64.dmg` for Intel.
 
-**It brings together:**
+1. Open the disk image and drag **Mentenaz Forge Super** into **Applications**.
+2. The first time, macOS blocks it ("Apple could not verify..."). Open **System Settings**, **Privacy & Security**, and choose **Open Anyway**. On macOS 14 and earlier you can right-click the app and choose **Open** instead.
+3. Or, in Terminal: `xattr -cr "/Applications/Mentenaz Forge Super.app"`, then open it as usual.
 
-- Runtime versions (Node, .NET, Python and Rust)
-- Security findings
-- Outdated dependencies
-- Git status
-- Project state
-- System health
+If it does not start, please [open an issue](https://github.com/mentenaz/mentenaz.Forge.Super/issues) with any message you see.
 
-An important design principle is that the dashboard distinguishes between:
+### Updating
 
-**Healthy → Unknown → Failed**
-
-For example, a project that hasn't been scanned should not silently appear healthy.
-
-Likewise, a missing project or failed operation should be visible rather than hidden behind an empty state.
+Forge Super does not update itself. It installs side by side with Zed and uses its own folders and link scheme (`forgesuper://`). It can tell you when a new release exists (an optional check against GitHub, at most once a day). See [Install](https://forge.mentenaz-server.com/docs/install) and [Updating](https://forge.mentenaz-server.com/docs/updating).
 
 ---
 
-# Visual Workflow Engine
+## What is inside
 
-One of the central experiments in Forge is a native visual workflow system.
+| Area | What it does |
+| --- | --- |
+| **Developer Cockpit** | One operational view of the project, its runtimes and the machine |
+| **Dashboard** | Runtime versions, security findings, outdated dependencies, Git status and system health, shown as healthy, unknown or failed |
+| **Database** | SQLite, PostgreSQL, MySQL and MariaDB, Microsoft SQL Server and Oracle: connections, schema explorer, SQL workbench, schema graph |
+| **Visual workflows (Flows)** | Executable workflows as an interactive graph: conditions, loops, try/catch, variables, HTTP actions, port waiting |
+| **Runtime panels** | Node, .NET, Python and Rust project tooling: run, build, test, environments |
+| **Package managers** | npm, NuGet, pip and Cargo: search, install, update, remove, vulnerability scanning |
+| **Helm (GitHub)** | A native GitHub client: repositories, issues, pull requests, Actions, clone, and a read-only repository Workspace |
+| **Git Insights** | Commit activity, most-changed files and collaborators |
+| **Process Monitor** | CPU, memory, per-core load, disk, network and running processes |
+| **Script Runner** | Run project scripts from the workspace, with clickable links in the output |
+| **Themes** | Forge Dark and Forge Light, plus Zed's own themes |
 
-![Forge Workflow Engine](docs/screenshots/Flow_Running.png)
+Each panel opens from the status bar and from the command palette, and most have a key (for example `Ctrl+K` then `D` for Databases, `Ctrl+K` then `H` for Helm). The [tutorials](https://forge.mentenaz-server.com/docs/tutorials) walk through each one.
 
-Workflows are represented as JSON and rendered as an interactive GPUI graph.
+---
 
-**The workflow system supports:**
+## A look inside
 
-- Sequential execution
-- Conditions
-- `if / else`
-- Loops
-- Try / catch
-- Error paths
-- Variables
-- Environment variables
-- HTTP actions
-- Port waiting
-- Action results
-- Execution state
-- Per-node results
+### Dashboard
 
-**The graph is backed by a dedicated:**
+Project, dependency, Git and system health in one place. A project that has not been scanned does not appear healthy; it shows as unknown.
+
+![Dashboard](docs/screenshots/DashBoard.png)
+
+### Visual workflows
+
+Workflows are stored as JSON and rendered as a graph that actually runs: sequential steps, `if / else`, loops, try/catch, error paths, variables, environment variables, HTTP actions and port waiting, with per-node results. The graph is backed by a dedicated `workflow_engine` crate.
+
+![Workflow engine](docs/screenshots/Flow_Running.png)
+
+### Database
+
+Connect to SQLite, PostgreSQL, MySQL and MariaDB, SQL Server or Oracle, with several connections open at once. Browse tables, columns and relationships, run SQL in the workbench, and see how tables relate in a schema graph.
+
+![Schema graph](docs/screenshots/Database_Schema_Graph.png)
+![SQL workbench](docs/screenshots/Database_Work_Bench.png)
+
+### Runtimes and package managers
+
+Each panel targets the active project and watches it on disk: when a manifest or lockfile changes, the panel rescans on its own.
+
+![Node](docs/screenshots/NodeJs.png)
+![Rust](docs/screenshots/Rust_Panel.png)
+![Cargo manager](docs/screenshots/Cargo_Manager.png)
+![npm manager](docs/screenshots/Node_Package_Manager.png)
+
+The Rust and Cargo panels read `Cargo.toml` and `Cargo.lock` directly and do not need `rust-analyzer`. The Cargo, npm and NuGet managers show security advisories (Cargo's come from the RustSec database through OSV.dev), and every change is confirmed before it is made.
+
+### Helm: GitHub inside the editor
+
+Sign in with GitHub's device flow or a token (stored in the operating system's credential store). Helm covers profiles, organizations, repository search and browsing, issues, pull requests (read, create, edit, close, reopen, merge and comment), Actions runs, releases, traffic, collaborators and cloning with a folder picker.
+
+![Helm home](docs/screenshots/Helm_Home.png)
+![Helm repository](docs/screenshots/Helm_Repo_Detail.png)
+
+A read-only **Workspace** tab opens any repository without cloning it: a file tree, rendered READMEs, syntax-highlighted previews, commit history, diffs, comparisons between refs and code search.
+
+![Helm workspace](docs/screenshots/Helm_Workspace.png)
+
+### Git Insights and process monitoring
+
+![Git insights](docs/screenshots/Git_Insights.png)
+![Processes](docs/screenshots/Processes.png)
+
+---
+
+## Privacy and accounts
+
+- **No account and no sign-in.** There is no collaboration service and no Zed-hosted AI. Forge Super does not contact Zed's servers for those.
+- **No usage data is sent**, and no crash reports are uploaded. Crashes are written to a local log only.
+- **AI is optional.** The agent panel is there, but you connect a provider yourself, and `"disable_ai": true` removes the interface entirely.
+- **It does not update itself.** The optional daily update check only asks `api.github.com` whether a newer release exists.
+
+The full list of what the app contacts is on the [Privacy](https://forge.mentenaz-server.com/docs/privacy) page.
+
+## What differs from Zed
+
+The editor, languages, themes, terminal, tasks, debugger, Git panel and key bindings are Zed's. Forge Super removes or switches off sign-in, collaboration, Zed-hosted AI, telemetry upload and the built-in updater, changes a few defaults, adds the panels above, and uses its own extension registry. [What's different from Zed](https://forge.mentenaz-server.com/docs/different-from-zed) lists it all, and says when Zed's own documentation applies.
+
+---
+
+## Status
+
+Forge Super is **experimental**: a personal research fork, not a finished commercial product.
+
+- **Windows** is the main development and test platform.
+- **Linux** is built and published through an apt repository on every release, and used, but tested less.
+- **macOS** builds are produced and published by CI (Apple Silicon and Intel), but have **not been tested on real hardware by the maintainer yet**.
+- Builds are **not code-signed** on any platform (see [Download and install](#download-and-install)).
+- Automated test coverage is limited; most testing is hands-on.
+- Workflow, database and SQL language-server tooling work but are still evolving.
+
+Bug reports and feedback are welcome on the [issue tracker](https://github.com/mentenaz/mentenaz.Forge.Super/issues).
+
+---
+
+## Build from source
+
+Build it the way you would build Zed: see Zed's development guides in this repository for [Windows](docs/src/development/windows.md), [Linux](docs/src/development/linux.md) and [macOS](docs/src/development/macos.md). The application binary is `forgedev`:
+
+```sh
+cargo build --release -p zed --bin forgedev
+```
+
+On Windows, `script/run-isolated.ps1` builds and runs a separate copy with its own data folder, so a development build does not touch an installed one.
+
+Releases are built by the [`build_installers`](.github/workflows/build_installers.yml) workflow. Pushing a tag matching `dev-v*` builds Windows, Linux and macOS and publishes a release; the workflow can also be run by hand from the Actions tab. Product names (display name, folders, executable and command names, URL scheme) come from [`editions.json`](editions.json).
+
+---
+
+## Architecture
+
+Forge Super is implemented inside the Zed codebase, not as an external program talking to Zed, so its panels use Zed's GPUI, workspace, project, Git, settings and language infrastructure directly. Each tool is its own crate, usually split into a `*_panel` crate (GPUI rendering) and a `*_backend` crate (database, process, Git and network logic) to keep merges with upstream Zed manageable.
 
 ```text
-workflow_engine
+cockpit_panel   dashboard_panel   processes_panel   script_runner_panel   designer_panel
+database_panel  database_backend
+flows_panel     workflow_engine   gpui_flow
+node_panel      dotnet_panel      python_panel      rust_panel
+npm_manager_panel  nuget_manager_panel  python_manager_panel  cargo_manager_panel  cargo_backend
+helm_panel      helm_backend      helm_ui           helm_workspace
 ```
 
-crate.
-
-That distinction is important.
-
-The graph is not simply a diagram of what a workflow _could_ do.
-
-**It represents an executable workflow.**
-
-A development workflow can therefore look conceptually like:
-
-```mermaid
-flowchart TD
-    A["Wait for service"] --> B["Set environment"] --> C["Execute action"] --> D{"Evaluate result"}
-    D -->|Success| E["Continue"]
-    D -->|Error| F["Handle error"]
-    classDef ok fill:#1b5e20,stroke:#1b5e20,color:#ffffff
-    classDef err fill:#b71c1c,stroke:#b71c1c,color:#ffffff
-    class E ok
-    class F err
-```
-
-**The broader experiment is:**
-
-> **What happens when workflow automation becomes a native capability of the development environment?**
+Existing Zed crates it modifies include `gpui`, `workspace`, `project`, `git`, `git_ui`, `settings`, `languages`, `remote` and `zed`. Forge Super also extends GPUI with zoom, pan and fit-to-view for its graph views, and the fork merges upstream Zed regularly.
 
 ---
 
-# Database Workbench
+## Why it exists
 
-Forge includes a database workspace designed around the idea that databases should be a first-class part of the development environment.
-
-### Supported databases
-
-- SQLite
-- PostgreSQL
-- MySQL
-- Microsoft SQL Server
-
-Multiple database connections can exist simultaneously.
-
-![Forge Database Schema Graph](docs/screenshots/Database_Schema_Graph.png)
-
-**The Database Workbench includes:**
-
-- Connection management
-- Schema explorer
-- Tables
-- Columns
-- Relationships
-- SQL workbench
-- Schema visualization
-- Relationship graphs
-
-### SQL Workbench
-
-![Forge SQL Workbench](docs/screenshots/Database_Work_Bench.png)
-
-The database visualization also shares the broader graph concepts being explored within Forge.
+The question behind the project: *what happens when the tools around a code editor become part of the editor itself?* A developer normally moves between an editor, a terminal, a Git client, GitHub, package managers, a database client, a process monitor and runtime managers. Forge Super explores whether those boundaries can shrink, by building the tools natively inside Zed's Rust and GPUI architecture instead of as a separate application. The panels are working Rust components, not mock-ups.
 
 ---
 
-# Runtime & Project Management
+## Relationship to Zed
 
-Forge provides dedicated development tooling for common project environments.
+Forge Super is a personal fork of [Zed](https://github.com/zed-industries/zed). It is **not an official Zed project** and is not affiliated with, endorsed by, sponsored by, or otherwise associated with Zed Industries. Zed is a trademark of its owners; it is named here only to say what this project is based on.
 
-Each panel targets the active project and watches it on disk: when a manifest
-or lockfile changes — an install from a terminal, a scaffold, or a hand edit —
-the affected panel rescans its projects and reloads that project's data on its
-own.
+## License
 
----
+The combined work is distributed under **GPL-3.0-or-later**, inherited from the Zed crates it modifies. Some components keep their own licenses: `gpui` and the GPUI component libraries are Apache-2.0, and `gpui_flow` is MIT. See the license files in the repository for the exact terms.
 
-## Node
+## Links
 
-![Forge Node](docs/screenshots/NodeJs.png)
-
-**The Node tooling provides project-aware operations including:**
-
-- Runtime information
-- Project targeting
-- Run
-- Build
-- Test
-
-The goal is to make the active development target explicit instead of requiring every operation to begin with manually constructed terminal commands.
-
----
-
-## .NET
-
-![Forge .NET](docs/screenshots/DotNet.png)
-
-**The .NET tooling provides:**
-
-- Solution selection
-- Project targeting
-- `dotnet run`
-- Development workflow integration
-
----
-
-## Python
-
-![Forge Python](docs/screenshots/Python_Panel.png)
-
-**The Python tooling provides:**
-
-- Environment setup
-- Project targeting
-- Python environment management
-
----
-
-## Rust
-
-Rust is the language Forge is written in, so its panel is built as a
-daily driver rather than a breadth exercise.
-
-![Forge Rust](docs/screenshots/Rust_Panel.png)
-
-**The Rust tooling provides:**
-
-- `rustc` and `cargo` toolchain information
-- Crate and workspace targeting
-- `check`, `build`, `run` and `test`
-- The crate's dependencies and their locked versions
-- Outdated versions, tagged by how far the version moves
-- Security advisories from the RustSec database, via OSV.dev
-
-The panel deliberately does not depend on `rust-analyzer`. It reads
-`Cargo.toml` and `Cargo.lock` directly, so it works with no Rust file open and
-updates when those files change.
-
----
-
-# Package Management
-
-Dependency management is treated as part of the development environment rather than a separate application.
-
----
-
-## npm
-
-![Forge npm Manager](docs/screenshots/Node_Package_Manager.png)
-![Forge npm Manager](docs/screenshots/Node_Package_Manager_Installed.png)
-![Forge npm Manager](docs/screenshots/Node_Package_Manager_Package_Details.png)
-
-**The npm tooling includes:**
-
-- Package search
-- Install
-- Update
-- Remove
-- Version information
-- Vulnerability scanning
-- Inline README viewing
-
----
-
-## NuGet
-
-![Forge NuGet Manager](docs/screenshots/Nuget_Manager.png)
-![Forge NuGet Manager](docs/screenshots/Nuget_Manager_Installed.png)
-![Forge NuGet Manager](docs/screenshots/Nuget_Manager_Updates.png)
-
-The NuGet tooling provides package discovery and management directly inside Forge.
-
----
-
-## Python / pip
-
-![Forge Python Package Manager](docs/screenshots/Python_Package_Manager.png)
-
-Python package management is integrated with the Python environment tooling.
-
----
-
-## Cargo
-
-The Cargo manager is the Rust counterpart to the npm and NuGet managers.
-
-![Forge Cargo Manager](docs/screenshots/Cargo_Manager.png)
-![Forge Cargo Manager](docs/screenshots/Cargo_Manager_Installed.png)
-![Forge Cargo Manager](docs/screenshots/Cargo_Manager_Updates.png)
-
-**The Cargo tooling includes:**
-
-- crates.io package search
-- Add a dependency
-- Update and update-all
-- Remove a dependency
-- Version information, including each version's minimum supported Rust version
-- Vulnerability scanning from the RustSec database, via OSV.dev
-- Inline README viewing
-
-Every action is confirmed first — an update shows Cargo's own dry-run, a
-remove says when the root manifest will change too, and an add says what Cargo
-will write. Dependencies inherited from `[workspace.dependencies]` are shown
-but not re-versioned, because no Cargo command edits that table safely.
-
----
-
-# GitHub — Helm
-
-Forge includes **Helm**, a native GitHub client implemented as part of the developer workspace.
-
-### Helm Home
-
-![Forge Helm](docs/screenshots/Helm_Home.png)
-
-### Helm Profile
-
-![Forge Helm](docs/screenshots/Helm_Profile.png)
-
-### Helm Edit Profile
-
-![Forge Helm](docs/screenshots/Helm_Edit_Profile.png)
-
-### Helm Org List
-
-![Forge Helm](docs/screenshots/Helm_Orgs.png)
-
-### Helm Org Page
-
-![Forge Helm](docs/screenshots/Helm_Org_Page.png)
-
-### Helm Org Repos
-
-![Forge Helm](docs/screenshots/Helm_Org_Repos.png)
-
-### Helm Repos
-
-![Forge Helm](docs/screenshots/Helm_Persornal_Repos.png)
-
-### Helm Repo Search
-
-![Forge Helm](docs/screenshots/Helm_Persornal_Repos_Search.png)
-
-### Helm Repo Detail
-
-![Forge Helm](docs/screenshots/Helm_Repo_Detail.png)
-
-### Helm Repo Traffic
-
-![Forge Helm](docs/screenshots/Helm_Repo_Detail_Activity.png)
-
-### Helm Repo Branches
-
-![Forge Helm](docs/screenshots/Helm_Repo_Detail_Branches.png)
-
-### Helm Repo Collaborators
-
-![Forge Helm](docs/screenshots/Helm_Repo_Detail_Collaborators.png)
-
-### Helm Repo Releases
-
-![Forge Helm](docs/screenshots/Helm_Repo_Detail_Releases.png)
-
-### Helm Clone Repository
-
-![Forge Helm](docs/screenshots/Helm_Repo_Clone.png)
-
-### Helm Clone — Folder Chosen
-
-![Forge Helm](docs/screenshots/Helm_Repo_Clone_Dir_Chosen.png)
-
-### Helm Clone — Cloning
-
-![Forge Helm](docs/screenshots/Helm_Repo_Cloned_Workspace_Switched_Install_option.png)
-
-Helm currently provides:
-
-- Profile viewing and editing
-- Organizations and organization repositories
-- Repository search
-- Repository browsing
-- Repository editing — description, homepage and topics
-- Repository inspection — branches, collaborators, issues, pull requests, releases, packages, traffic, commits, actions, deployments, tags and security
-- Clone operations with a folder picker
-- Working-directory integration
-
-### Repository Workspace
-
-Beyond the detail screens, Helm opens a read-only **Workspace** tab for a
-repository.
-
-![Forge Helm Workspace](docs/screenshots/Helm_Workspace.png)
-
-**The Workspace tab provides:**
-
-- A repository overview
-- A keyboard-navigable file tree with a local name filter
-- README rendering for the repository and for the selected folder
-- Syntax-highlighted file preview, image previews, and GitHub permalinks at the
-  exact commit
-- Paged commit history, per-file history, and commit diffs in a read-only editor
-- Comparison of commits and changed files between two refs
-- Repository- and ref-scoped code search
-- Opening files from a matching local checkout, or cloning the repository when
-  none is open
-
-Credentials are stored using the operating system's secure credential/keychain facilities.
-
-The intended workflow is:
-
-```mermaid
-flowchart LR
-    subgraph grp1["Get the code"]
-        A["GitHub"] --> B["Search repository"] --> C["Clone"]
-    end
-    subgraph grp2["Get it running"]
-        D["Open project"] --> E["Configure environment"] --> F["Install dependencies"] --> G["Run / Build / Test"]
-    end
-    C --> D
-```
-
-The goal is to remove unnecessary boundaries between **source control and development**.
-
----
-
-# Git Insights
-
-Forge extends the Git experience with a Details view that provides higher-level repository information.
-
-![Forge Git Details](docs/screenshots/Git_Insights.png)
-
-The Details view includes information such as:
-
-- Commit activity
-- Most-changed files
-- Collaborators
-
-This is intended to complement the normal Git workflow with a more contextual view of the repository.
-
----
-
-# Processes & System Monitoring
-
-Forge also exposes the machine underneath the development environment.
-
-![Forge Processes](docs/screenshots/Processes.png)
-
-The Processes tooling provides:
-
-- CPU usage
-- RAM usage
-- Per-core CPU metrics
-- Disk information
-- Network information
-- Running processes
-- Process termination
-
-This creates an interesting feedback loop:
-
-```mermaid
-flowchart LR
-    A["Build"] --> B["Application starts"] --> C["Process appears"] --> D["Resource usage changes"] --> E["Developer investigates"]
-    E -.-> A
-```
-
-The development environment can therefore expose both **what the developer is building** and **what the machine is doing as a result**.
-
----
-
-# Script Runner
-
-Forge includes a dedicated script execution surface.
-
-### Script Runner Idle
-
-![Forge Script Runner](docs/screenshots/Script_Runner_Idle.png)
-
-### Script Runner Running With link navigate and copy
-
-![Forge Script Runner](docs/screenshots/Script_Runner_Running_With_Link.png)
-
-The purpose is to make commonly used development operations accessible from the workspace while still allowing the underlying commands and workflow to remain explicit.
-
----
-
-# Why I Built This
-
-Forge started with a simple question:
-
-> **What happens when the tools surrounding a code editor become part of the editor itself?**
-
-Most development environments require a developer to move between:
-
-- Code editor
-- Terminal
-- Git client
-- GitHub
-- Package managers
-- Database clients
-- Process monitors
-- Runtime managers
-- Workflow systems
-- System tools
-
-Forge explores whether those boundaries can be reduced.
-
-Rather than building the experiment as a separate application, I chose to implement it **directly inside Zed's Rust/GPUI architecture**.
-
-That decision changed the nature of the project.
-
-Building the features required working across:
-
-- UI architecture
-- Rust
-- GPUI
-- Workspace architecture
-- Project management
-- Git
-- Package management
-- Databases
-- Process management
-- Language tooling
-- GitHub APIs
-- Application integration
-
-The result is both a product experiment and a technical exploration.
-
----
-
-# Design & Engineering Principles
-
-Forge is guided by several principles.
-
-### Native First
-
-Tooling should feel like part of the editor rather than an external application bolted onto it.
-
-### Information Should Be Actionable
-
-A dashboard should not simply tell the developer that something is wrong.
-
-It should provide enough context to understand and operate on that state.
-
-### Visualizations Should Represent Real Systems
-
-The workflow graph represents an executable workflow.
-
-The database graph represents actual schema relationships.
-
-Visual UI should correspond to real underlying state.
-
-### Complexity Should Be Progressive
-
-Simple operations should remain simple.
-
-More detailed information should become available when the developer needs it without overwhelming the primary workflow.
-
-### Prototype in the Real Product
-
-Ideas are explored directly in Rust/GPUI and the actual application architecture rather than being limited to static design artifacts.
-
-This allows interaction, architecture and implementation constraints to influence one another during development.
-
----
-
-# Built on Zed's Architecture
-
-Forge is deliberately implemented **inside the Zed codebase** rather than as an external application communicating with Zed.
-
-The project therefore interacts directly with existing Zed infrastructure including:
-
-- GPUI
-- Workspace
-- Project
-- Git
-- Git UI
-- Languages
-- Settings
-- JSON schema infrastructure
-- Remote infrastructure
-- Filesystem infrastructure
-- Icons
-- Paths
-
-This makes the project substantially deeper than simply adding independent UI panels.
-
----
-
-# GPUI Improvements
-
-Forge also required extending GPUI for its visual tooling.
-
-One of the changes adds:
-
-- Zoom
-- Pan
-- Fit-to-view scaling
-
-to the graph/visualization experience.
-
-The intention is to eventually isolate and validate this work as a potential **upstream contribution to GPUI**.
-
-Forge therefore acts as a practical environment for identifying limitations and exploring improvements in the underlying UI framework.
-
----
-
-# Architecture
-
-Forge is divided into dedicated Rust crates rather than placing the entire implementation inside one large application module.
-
-Some of the major components include:
-
-```text
-cockpit_panel
-dashboard_panel
-
-database_backend
-database_panel
-
-flows_panel
-workflow_engine
-
-node_panel
-dotnet_panel
-python_panel
-rust_panel
-
-npm_manager_panel
-nuget_manager_panel
-python_manager_panel
-cargo_manager_panel
-cargo_backend
-
-processes_panel
-
-helm_backend
-helm_panel
-helm_ui
-helm_workspace
-
-script_runner_panel
-designer_panel
-```
-
-This allows individual systems to maintain their own domain logic while integrating with the broader Zed workspace and UI architecture.
-
-The architecture is intentionally experimental.
-
-Some components are mature enough for regular use, while others are prototypes exploring where the concepts could go next.
-
----
-
-# How Forge Fits Together
-
-The individual systems are useful on their own.
-
-The more interesting experiment is what happens when they become part of the same environment.
-
-```mermaid
-flowchart TD
-    GH["GitHub"] --> Helm["Helm"] --> Project["Project"]
-    Project --> Runtime["Runtime setup<br/>Node / .NET / Python / Rust"]
-    Project --> Deps["Dependencies<br/>npm / NuGet / pip / Cargo"]
-    Runtime --> DB["Database"]
-    Deps --> DB
-    DB --> WF["Workflow engine"]
-    WF --> Run["Application run"]
-    Run --> Proc["Processes"]
-    Proc --> Health["System health"]
-    classDef src fill:#1F3A5F,stroke:#1F3A5F,color:#ffffff
-    classDef setup fill:#2f6f8f,stroke:#2f6f8f,color:#ffffff
-    classDef data fill:#6a4c93,stroke:#6a4c93,color:#ffffff
-    classDef live fill:#2e7d32,stroke:#2e7d32,color:#ffffff
-    class GH,Helm src
-    class Project,Runtime,Deps setup
-    class DB,WF data
-    class Run,Proc,Health live
-```
-
-The long-term idea is to turn these into **connected developer capabilities rather than isolated utilities**.
-
----
-
-# What Changed in Zed
-
-Existing Zed areas modified or extended include:
-
-- `gpui`
-- `workspace`
-- `git`
-- `git_ui`
-- `project`
-- `settings`
-- `settings_content`
-- `json_schema_store`
-- `languages`
-- `zed`
-- `fs`
-- `icons`
-- `paths`
-- `remote`
-
-Forge also introduces dedicated crates for the new developer tooling.
-
-The fork therefore represents an exploration of how deeply a developer cockpit can integrate with the architecture of a native editor.
-
----
-
-# Current Status
-
-Forge is currently:
-
-- Developed and tested primarily on Windows
-- Built directly from the Zed source tree
-- Functional across the major developer-tooling areas described above
-- Still experimental
-- Tested primarily through hands-on usage
-- Limited in automated test coverage
-
-Some areas are more mature than others.
-
-### Known limitations
-
-- Workflow tooling is functional but evolving.
-- Database tooling is functional but evolving.
-- GPUI graph functionality continues to be refined.
-- SQL language-server completion remains rough.
-- Cross-platform testing is not yet complete.
-- Automated test coverage is currently limited.
-- Releases are unsigned development builds, not a polished public release (see Build).
-- macOS builds are produced by CI but have not been tested.
-
-The repository should therefore be viewed as an **active research and engineering project**, rather than a finished commercial product.
-
----
-
-# What I Am Exploring
-
-The purpose of this fork is not to claim that every feature belongs in Zed.
-
-It is an exploration of:
-
-- Native developer tooling
-- Rust application architecture
-- GPUI
-- IDE interaction design
-- Visual workflow systems
-- Database tooling
-- Developer environment management
-- System observability
-- GitHub integration
-- Cross-tool developer workflows
-- Native application UX
-
-The interesting question is how these pieces interact when they share the same environment.
-
----
-
-# Build
-
-This repository is intended primarily for development and experimentation.
-
-To build the project, follow Zed's Windows development instructions:
-
-[Zed Windows Build Guide](docs/src/development/windows.md)
-
-The current development and testing environment is Windows.
-
-Unsigned development builds for Windows, Linux and macOS can also be produced
-by the [`build_installers`](.github/workflows/build_installers.yml) workflow:
-run it manually from the Actions tab, or push a tag matching `dev-v*` to
-publish a prerelease. The builds are unsigned, so each platform warns on first
-run (SmartScreen on Windows, Gatekeeper on macOS). Windows is the tested
-platform; the Linux and macOS builds come from the same workflow but have not
-been tested by hand.
-
----
-
-# Relationship to Zed
-
-This repository is a personal research fork of Zed.
-
-It is **not an official Zed project**.
-
-It is not affiliated with, endorsed by, sponsored by, or otherwise associated with Zed Industries.
-
-The original Zed project can be found at:
-
-https://github.com/zed-industries/zed
-
----
-
-# Licensing
-
-The combined work is distributed under **GPL-3.0-or-later**, inherited from the Zed crates modified by this project.
-
-Relevant components retain their applicable original licensing:
-
-- `gpui` and GPUI component libraries — Apache-2.0
-- `gpui_flow` — MIT © Adib
-- Forge-specific code — see the applicable crate and repository licensing information
-
-See the repository license files for the exact terms.
-
----
-
-# Mentenaz Forge
-
-This repository is part of the broader **Mentenaz Forge** experiment.
-
-Forge explores the idea of a **developer cockpit / developer OS** where the tools surrounding software development become part of the development environment itself.
-
-The Zed fork is the native Rust/GPUI implementation of that idea.
-
-**This project is intentionally experimental.**
-
-The goal is to explore how far a code editor can evolve into a complete developer workspace while retaining the speed, native performance and composability of the underlying platform.
+- Website: <https://forge.mentenaz-server.com>
+- Documentation and tutorials: <https://forge.mentenaz-server.com/docs>
+- Releases: <https://github.com/mentenaz/mentenaz.Forge.Super/releases>
+- Issues: <https://github.com/mentenaz/mentenaz.Forge.Super/issues>
