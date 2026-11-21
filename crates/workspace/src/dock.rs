@@ -24,6 +24,21 @@ use util::ResultExt as _;
 
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
 
+/// Stock panels that have no title row of their own. The dock draws them the
+/// same header the Forge panels use (`gpui_component::panel_header::PanelHeader`:
+/// icon and title over a divider), so the dock looks the same throughout. It is
+/// an allowlist so that a panel upstream adds later is left as it is, and the
+/// Forge panels, which draw their own header, never get a second one.
+const PANELS_WITH_DOCK_HEADER: &[&str] = &["ProjectPanel", "OutlinePanel"];
+
+fn render_dock_panel_header(title: &'static str, icon: Option<ui::IconName>) -> impl IntoElement {
+    let mut header = gpui_component::panel_header::PanelHeader::new(title);
+    if let Some(icon) = icon {
+        header = header.icon(Icon::new(icon).size(IconSize::Small).color(Color::Muted));
+    }
+    header
+}
+
 pub enum PanelEvent {
     ZoomIn,
     ZoomOut,
@@ -1356,10 +1371,22 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let dispatch_context = Self::dispatch_context(cx);
         if let Some(entry) = self.visible_entry() {
             let position = self.position;
+            let panel_header = if PANELS_WITH_DOCK_HEADER.contains(&entry.panel.panel_key()) {
+                entry
+                    .panel
+                    .icon_tooltip(window, cx)
+                    .map(|title| render_dock_panel_header(title, entry.panel.icon(window, cx)))
+            } else {
+                None
+            };
+            let panel_view = entry
+                .panel
+                .to_any()
+                .cached(StyleRefinement::default().v_flex().size_full());
             let create_resize_handle = || {
                 let handle = div()
                     .id("resize-handle")
@@ -1445,12 +1472,14 @@ impl Render for Dock {
                             Axis::Horizontal => this.w_full().h_full(),
                             Axis::Vertical => this.h_full().w_full(),
                         })
-                        .child(
-                            entry
-                                .panel
-                                .to_any()
-                                .cached(StyleRefinement::default().v_flex().size_full()),
-                        ),
+                        .map(|this| match panel_header {
+                            Some(header) => this.child(
+                                v_flex().size_full().child(header).child(
+                                    div().flex_1().min_h_0().w_full().child(panel_view),
+                                ),
+                            ),
+                            None => this.child(panel_view),
+                        }),
                 )
                 .when(self.resizable(cx), |this| {
                     this.child(create_resize_handle())
