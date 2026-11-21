@@ -13,7 +13,7 @@ It is made by Francois Huyzers ([@mentenaz](https://github.com/mentenaz)). It is
 
 | | |
 | --- | --- |
-| **What it is** | A fork of Zed 1.30 with a developer cockpit added |
+| **What it is** | A fork of Zed 1.31 with a developer cockpit added |
 | **Built with** | Rust and GPUI |
 | **Platforms** | Windows (x86_64), Linux (Debian, Ubuntu, Kali; amd64), macOS (Apple Silicon and Intel) |
 | **Cost and accounts** | Free. No account, no sign-in, no usage data sent |
