@@ -7308,6 +7308,9 @@ dependencies = [
 [[package]]
 name = "forge_trust_gate"
 version = "0.1.0"
+dependencies = [
+ "log",
+]
 
 [[package]]
 name = "fork"

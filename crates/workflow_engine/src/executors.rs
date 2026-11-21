@@ -564,7 +564,13 @@ async fn run_script_process(
 ) -> Result<Map<String, Value>, String> {
     // The script and the folder it runs in come from the project's flow file.
     if let Some(working_dir) = working_dir {
-        forge_trust_gate::check(working_dir)?;
+        let logged_args: Vec<&str> = args.iter().map(String::as_str).collect();
+        forge_trust_gate::check_run(
+            "workflow_engine::run_script_process",
+            program,
+            &logged_args,
+            Some(working_dir),
+        )?;
     }
     let mut cmd = TokioCommand::new(program);
     if let Some(context_file) = context_file {
@@ -1304,7 +1310,13 @@ async fn execute_start_process(
 
         // The command and the folder come from the project's flow file.
         if let Some(cwd) = &cwd {
-            forge_trust_gate::check(cwd)?;
+            let logged_args: Vec<&str> = args.iter().map(String::as_str).collect();
+            forge_trust_gate::check_run(
+                "workflow_engine::StartProcess",
+                &command,
+                &logged_args,
+                Some(std::path::Path::new(cwd)),
+            )?;
         }
 
         #[cfg(target_os = "windows")]

@@ -142,7 +142,13 @@ pub struct NpmPackageDetails {
 pub fn run_npm_cli(project_root: &str, cli_name: &str, args: &[String]) -> Result<String, String> {
     // The package manager reads the project's own configuration (`.npmrc`,
     // `package.json`), so it only runs in a project that is trusted.
-    forge_trust_gate::check(project_root)?;
+    let logged_args: Vec<&str> = args.iter().map(String::as_str).collect();
+    forge_trust_gate::check_run(
+        "npm_backend::run_npm_cli",
+        cli_name,
+        &logged_args,
+        Some(std::path::Path::new(project_root)),
+    )?;
     let make_command = |exe: &str, run_args: &[String]| {
         let mut command = Command::new(exe);
         command

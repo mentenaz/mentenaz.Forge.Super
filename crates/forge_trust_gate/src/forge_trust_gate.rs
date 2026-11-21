@@ -125,15 +125,39 @@ pub fn classify(path: impl AsRef<Path>) -> Trust {
     }
 }
 
-/// Whether a program may be started in `path`, a project folder: only when the
-/// editor has marked it trusted. A folder it has not classified yet, and one in
-/// Restricted Mode, are both refused, with the message to show.
-pub fn check(path: impl AsRef<Path>) -> Result<(), String> {
-    if !lock().enforcing {
-        return Ok(());
+/// What the gate decided about one request, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Allow(&'static str),
+    BlockRestricted(&'static str),
+    BlockUnchecked(&'static str),
+}
+
+impl Verdict {
+    fn is_allowed(self) -> bool {
+        matches!(self, Verdict::Allow(_))
     }
-    // An empty folder means the process's own.
-    let path = path.as_ref();
+
+    fn reason(self) -> &'static str {
+        match self {
+            Verdict::Allow(reason)
+            | Verdict::BlockRestricted(reason)
+            | Verdict::BlockUnchecked(reason) => reason,
+        }
+    }
+
+    fn result(self) -> Result<(), String> {
+        match self {
+            Verdict::Allow(_) => Ok(()),
+            Verdict::BlockRestricted(_) => Err(RESTRICTED_MESSAGE.to_string()),
+            Verdict::BlockUnchecked(_) => Err(UNCHECKED_MESSAGE.to_string()),
+        }
+    }
+}
+
+/// The verdict for starting something in the project folder `path`: only a folder
+/// the editor has marked trusted passes. An empty folder means the process's own.
+fn decide_folder(path: &Path) -> Verdict {
     let own;
     let path = if path.as_os_str().is_empty() {
         own = std::env::current_dir().unwrap_or_default();
@@ -142,10 +166,37 @@ pub fn check(path: impl AsRef<Path>) -> Result<(), String> {
         path
     };
     match classify(path) {
-        Trust::Trusted => Ok(()),
-        Trust::Restricted => Err(RESTRICTED_MESSAGE.to_string()),
-        Trust::Unclassified => Err(UNCHECKED_MESSAGE.to_string()),
+        Trust::Trusted => Verdict::Allow("the folder is trusted"),
+        Trust::Restricted => Verdict::BlockRestricted("the folder is in Restricted Mode"),
+        Trust::Unclassified => {
+            Verdict::BlockUnchecked("the folder has not been classified as trusted yet")
+        }
     }
+}
+
+/// The verdict for starting `program`, judged by the file it resolves to.
+fn decide_program(program: &Path) -> Verdict {
+    let resolved = resolve_program(program);
+    match resolved.as_deref().map_or(Trust::Unclassified, classify) {
+        Trust::Trusted => Verdict::Allow("the program is inside a trusted folder"),
+        Trust::Restricted => {
+            Verdict::BlockRestricted("the program is inside a folder in Restricted Mode")
+        }
+        Trust::Unclassified if is_settled() => {
+            Verdict::Allow("the program is outside every project")
+        }
+        Trust::Unclassified => Verdict::BlockUnchecked("projects are still being classified"),
+    }
+}
+
+/// Whether a program may be started in `path`, a project folder: only when the
+/// editor has marked it trusted. A folder it has not classified yet, and one in
+/// Restricted Mode, are both refused, with the message to show.
+pub fn check(path: impl AsRef<Path>) -> Result<(), String> {
+    if !lock().enforcing {
+        return Ok(());
+    }
+    decide_folder(path.as_ref()).result()
 }
 
 /// Whether `program` may be started. It is resolved first (a bare name is looked
@@ -162,13 +213,93 @@ pub fn check_program(program: impl AsRef<OsStr>) -> Result<(), String> {
     if !lock().enforcing {
         return Ok(());
     }
-    let resolved = resolve_program(Path::new(program.as_ref()));
-    match resolved.as_deref().map_or(Trust::Unclassified, classify) {
-        Trust::Trusted => Ok(()),
-        Trust::Restricted => Err(RESTRICTED_MESSAGE.to_string()),
-        Trust::Unclassified if is_settled() => Ok(()),
-        Trust::Unclassified => Err(UNCHECKED_MESSAGE.to_string()),
+    decide_program(Path::new(program.as_ref())).result()
+}
+
+/// What every backend calls just before it starts something, and the one place a
+/// decision is written to the log, whether it allows the request or blocks it.
+///
+/// * `who` names the code that asked, for the log (the backend function; the
+///   file and line of the call are added from the call site).
+/// * `program` and `args` are what is about to be started.
+/// * `folder` is the project folder it runs in. With a folder, the folder decides
+///   (it must be trusted); without one the program is judged by where it lives.
+///
+/// Returns the error to show when the request is blocked. Before the editor has
+/// switched the gate on, nothing is checked and nothing is logged.
+#[track_caller]
+pub fn check_run(
+    who: &str,
+    program: impl AsRef<OsStr>,
+    args: &[&str],
+    folder: Option<&Path>,
+) -> Result<(), String> {
+    let caller = std::panic::Location::caller();
+    if !lock().enforcing {
+        return Ok(());
     }
+    let program = program.as_ref().to_string_lossy();
+    let verdict = match folder {
+        Some(folder) => decide_folder(folder),
+        None => decide_program(Path::new(&*program)),
+    };
+    let line = describe(
+        verdict,
+        who,
+        &format!("{}:{}", caller.file(), caller.line()),
+        &program,
+        args,
+        folder,
+    );
+    if verdict.is_allowed() {
+        log::info!("{line}");
+    } else {
+        log::warn!("{line}");
+    }
+    verdict.result()
+}
+
+/// The longest command text a log line carries, so a long script does not flood
+/// the log.
+const LOG_COMMAND_LIMIT: usize = 300;
+
+/// One log line: the decision, the program and its arguments, the folder, who
+/// asked and why.
+fn describe(
+    verdict: Verdict,
+    who: &str,
+    call_site: &str,
+    program: &str,
+    args: &[&str],
+    folder: Option<&Path>,
+) -> String {
+    let mut command = program.to_string();
+    for arg in args {
+        command.push(' ');
+        if arg.contains(' ') {
+            command.push('"');
+            command.push_str(arg);
+            command.push('"');
+        } else {
+            command.push_str(arg);
+        }
+    }
+    if command.chars().count() > LOG_COMMAND_LIMIT {
+        command = command.chars().take(LOG_COMMAND_LIMIT).collect::<String>() + "...";
+    }
+    format!(
+        "forge_trust_gate: {} {command} | folder: {} | asked by: {who} ({call_site}) | because {}",
+        if verdict.is_allowed() {
+            "ALLOWED"
+        } else {
+            "BLOCKED"
+        },
+        folder.map_or_else(
+            || "(none)".to_string(),
+            |folder| folder.display().to_string()
+        ),
+        verdict.reason(),
+    )
 }
 
 /// The file `program` would start: itself when it names a path, otherwise the
@@ -434,6 +565,87 @@ mod tests {
         let own = std::env::current_dir().unwrap();
         classified(&[own.to_str().unwrap()], &[]);
         assert_eq!(check(""), Ok(()));
+    }
+
+    #[test]
+    fn check_run_decides_like_check_and_check_program() {
+        let _turn = fresh();
+        assert_eq!(
+            check_run(
+                "test",
+                "cargo",
+                &["metadata"],
+                Some(Path::new("/work/repo"))
+            ),
+            Ok(()),
+            "nothing is checked before the gate is switched on"
+        );
+
+        enforce();
+        classified(&["/work/ok"], &["/work/repo"]);
+        assert_eq!(
+            check_run("test", "cargo", &["metadata"], Some(Path::new("/work/ok"))),
+            Ok(())
+        );
+        assert_eq!(
+            check_run(
+                "test",
+                "cargo",
+                &["metadata"],
+                Some(Path::new("/work/repo"))
+            ),
+            Err(RESTRICTED_MESSAGE.to_string())
+        );
+        assert_eq!(
+            check_run("test", "cargo", &[], Some(Path::new("/work/new"))),
+            Err(UNCHECKED_MESSAGE.to_string())
+        );
+        // Without a folder the program is judged by where it lives.
+        assert_eq!(
+            check_run("test", "/work/repo/.venv/bin/python", &["-m", "pip"], None),
+            Err(RESTRICTED_MESSAGE.to_string())
+        );
+        assert_eq!(check_run("test", "/usr/bin/python3", &[], None), Ok(()));
+    }
+
+    #[test]
+    fn a_log_line_names_the_decision_program_arguments_folder_and_who_asked() {
+        let blocked = describe(
+            Verdict::BlockRestricted("the folder is in Restricted Mode"),
+            "cargo_backend::run_cargo_output",
+            "crates/cargo_backend/src/cargo_backend.rs:112",
+            "cargo",
+            &["metadata", "--no-deps", "--format-version", "1"],
+            Some(Path::new("E:/canary-test/project")),
+        );
+        assert_eq!(
+            blocked,
+            "forge_trust_gate: BLOCKED cargo metadata --no-deps --format-version 1 \
+             | folder: E:/canary-test/project \
+             | asked by: cargo_backend::run_cargo_output \
+             (crates/cargo_backend/src/cargo_backend.rs:112) \
+             | because the folder is in Restricted Mode"
+        );
+
+        let allowed = describe(
+            Verdict::Allow("the program is outside every project"),
+            "python_backend::run_captured",
+            "crates/python_backend/src/python_backend.rs:105",
+            "python",
+            &["-m", "pip", "list", "--format", "my json"],
+            None,
+        );
+        assert!(allowed.contains("ALLOWED python -m pip list --format \"my json\""));
+        assert!(allowed.contains("folder: (none)"));
+        assert!(allowed.contains("asked by: python_backend::run_captured"));
+    }
+
+    #[test]
+    fn a_long_command_is_cut_in_the_log() {
+        let script = "x".repeat(1000);
+        let line = describe(Verdict::Allow("ok"), "who", "here:1", &script, &[], None);
+        assert!(line.contains(&format!("{}...", "x".repeat(LOG_COMMAND_LIMIT))));
+        assert!(!line.contains(&"x".repeat(LOG_COMMAND_LIMIT + 1)));
     }
 
     #[test]

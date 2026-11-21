@@ -101,7 +101,12 @@ fn run_cargo_output(args: &[&str], cwd: Option<&str>) -> Result<(String, String)
     // `cargo` reads the project's own configuration (`.cargo/config.toml` can name
     // a compiler wrapper), so it only runs in a project that is trusted.
     if let Some(cwd) = cwd {
-        forge_trust_gate::check(cwd)?;
+        forge_trust_gate::check_run(
+            "cargo_backend::run_cargo_output",
+            "cargo",
+            args,
+            Some(Path::new(cwd)),
+        )?;
     }
     let mut command = gpui_util::new_std_command("cargo");
     command.args(args);
@@ -128,6 +133,10 @@ fn run_cargo_output(args: &[&str], cwd: Option<&str>) -> Result<(String, String)
     })
 }
 
+/// The `cargo metadata` call: manifests only, and the output format asked for by
+/// number so a newer Cargo cannot change the shape under us.
+const METADATA_ARGS: [&str; 4] = ["metadata", "--no-deps", "--format-version", "1"];
+
 /// Loads the workspace that `dir` belongs to: its root, its crates, and each
 /// crate's declared dependencies.
 ///
@@ -135,10 +144,7 @@ fn run_cargo_output(args: &[&str], cwd: Option<&str>) -> Result<(String, String)
 /// resolve dependencies, touch the network, or compile. On a 286-crate
 /// workspace it takes about a second. Blocking: call from a background task.
 pub fn load_workspace(dir: &str) -> Result<Workspace, String> {
-    let json = run_cargo(
-        &["metadata", "--no-deps", "--format-version", "1"],
-        Some(dir),
-    )?;
+    let json = run_cargo(&METADATA_ARGS, Some(dir))?;
     parse_metadata(&json)
 }
 
@@ -301,6 +307,14 @@ mod tests {
     use super::*;
 
     const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+    #[test]
+    fn cargo_metadata_is_always_asked_for_manifests_only_in_format_version_1() {
+        assert_eq!(
+            METADATA_ARGS,
+            ["metadata", "--no-deps", "--format-version", "1"]
+        );
+    }
 
     fn dependency(name: &str, kind: DependencyKind, source: DependencySource) -> Dependency {
         Dependency {

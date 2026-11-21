@@ -429,7 +429,12 @@ impl ScriptRunnerPanel {
 
         // A script runs with the project's own files and configuration, so it
         // only runs in a project that is trusted (as tasks do).
-        if let Err(message) = forge_trust_gate::check(&self.cwd) {
+        if let Err(message) = forge_trust_gate::check_run(
+            "script_runner_panel::run",
+            &cmd,
+            &[],
+            Some(std::path::Path::new(&self.cwd)),
+        ) {
             self.output.clear();
             self.output.push(format!("$ {cmd}"));
             self.output.push(message);

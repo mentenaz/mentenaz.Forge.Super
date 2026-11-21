@@ -213,7 +213,7 @@ fn run_captured(exe: &str, args: &[&str]) -> Result<String, String> {
     // `exe` can be a runtime the project carries itself. It is resolved first (a
     // bare name through `PATH`) and the file it names is judged, so a program
     // inside a project that is not trusted is not started.
-    forge_trust_gate::check_program(exe)?;
+    forge_trust_gate::check_run("node_backend::run_captured", exe, args, None)?;
     let mut c = gpui_util::new_std_command(exe);
     c.args(args);
     #[cfg(target_os = "windows")]

@@ -102,7 +102,7 @@ fn run_captured(exe: &str, args: &[&str]) -> Result<String, String> {
     // (a bare name through `PATH`) and the file it names is judged, before
     // anything is spawned, so a program inside a project that is not trusted is
     // not started.
-    forge_trust_gate::check_program(exe)?;
+    forge_trust_gate::check_run("python_backend::run_captured", exe, args, None)?;
     let mut c = gpui_util::new_std_command(exe);
     c.args(args);
     #[cfg(target_os = "windows")]

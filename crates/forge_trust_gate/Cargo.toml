@@ -9,3 +9,6 @@ publish = false
 [lib]
 path = "src/forge_trust_gate.rs"
 doctest = false
+
+[dependencies]
+log.workspace = true

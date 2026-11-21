@@ -462,7 +462,12 @@ pub fn fmt_downloads(n: u64) -> String {
 fn run_dotnet_captured(args: &[&str], cwd: &str) -> Result<String, String> {
     // `dotnet` evaluates the project's own build files, which can run programs,
     // so it only runs in a project that is trusted.
-    forge_trust_gate::check(cwd)?;
+    forge_trust_gate::check_run(
+        "dotnet_backend::run_dotnet_captured",
+        "dotnet",
+        args,
+        Some(std::path::Path::new(cwd)),
+    )?;
     run_dotnet_unchecked(args, cwd)
 }
 
