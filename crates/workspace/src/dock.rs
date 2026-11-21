@@ -24,12 +24,20 @@ use util::ResultExt as _;
 
 pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
 
-/// Stock panels that have no title row of their own. The dock draws them the
-/// same header the Forge panels use (`gpui_component::panel_header::PanelHeader`:
-/// icon and title over a divider), so the dock looks the same throughout. It is
-/// an allowlist so that a panel upstream adds later is left as it is, and the
-/// Forge panels, which draw their own header, never get a second one.
-const PANELS_WITH_DOCK_HEADER: &[&str] = &["ProjectPanel", "OutlinePanel"];
+/// The stock Zed panels, which the dock draws the same header the Forge panels
+/// use (`gpui_component::panel_header::PanelHeader`: icon and title over a
+/// divider), so the dock looks the same throughout. It is an allowlist so that a
+/// panel upstream adds later is left as it is, and the Forge panels, which draw
+/// their own header, never get a second one. Remove a key to take a panel off.
+const PANELS_WITH_DOCK_HEADER: &[&str] = &[
+    "ProjectPanel",
+    "OutlinePanel",
+    "GitPanel",
+    "TerminalPanel",
+    "DebugPanel",
+    "agent_panel",
+    "CollaborationPanel",
+];
 
 fn render_dock_panel_header(title: &'static str, icon: Option<ui::IconName>) -> impl IntoElement {
     let mut header = gpui_component::panel_header::PanelHeader::new(title);
