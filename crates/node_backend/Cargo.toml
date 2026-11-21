@@ -12,6 +12,7 @@ doctest = false
 
 [dependencies]
 dunce.workspace = true
+forge_trust_gate.workspace = true
 gpui_util.workspace = true
 log.workspace = true
 serde = { workspace = true, features = ["derive"] }

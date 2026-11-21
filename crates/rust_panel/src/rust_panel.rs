@@ -247,6 +247,12 @@ impl RustPanel {
             let scan_subscription =
                 cx.observe_global::<SharedScans>(|this: &mut Self, cx| this.adopt_shared_scan(cx));
 
+            // Scan again when the project is trusted (or stop when it is not).
+            let trust_subscription = forge_trust::on_trust_changed(cx, |this: &mut Self, cx| {
+                this.detect_toolchain(cx);
+                this.reload(cx);
+            });
+
             let mut open = HashMap::new();
             for section in [
                 "Crates",
@@ -282,7 +288,12 @@ impl RustPanel {
                 load_task: None,
                 outdated_task: None,
                 advisory_task: None,
-                _subscriptions: vec![filter_subscription, project_subscription, scan_subscription],
+                _subscriptions: vec![
+                    filter_subscription,
+                    project_subscription,
+                    scan_subscription,
+                    trust_subscription,
+                ],
             };
             panel.detect_toolchain(cx);
             panel.reload(cx);

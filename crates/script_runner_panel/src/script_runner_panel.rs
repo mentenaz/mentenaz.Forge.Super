@@ -427,6 +427,16 @@ impl ScriptRunnerPanel {
             return;
         }
 
+        // A script runs with the project's own files and configuration, so it
+        // only runs in a project that is trusted (as tasks do).
+        if let Err(message) = forge_trust_gate::check(&self.cwd) {
+            self.output.clear();
+            self.output.push(format!("$ {cmd}"));
+            self.output.push(message);
+            cx.notify();
+            return;
+        }
+
         self.output.clear();
         self.output.push(format!("$ {cmd}"));
         self.pending_command = Some(cmd.clone());

@@ -37,6 +37,25 @@ To check, read the dev build's log for `New foreground hang detected` entries:
 each lists the `file:line` and duration of a main-thread stall. `Background
 hang` entries are off-thread and do not freeze the UI.
 
+# Panels: run a project's own tooling only in a trusted project
+
+A panel that starts `cargo`, `dotnet`, `npm`, `python`, a script or a flow in (or
+from) a project folder runs that project's own configuration (`.cargo/config.toml`,
+MSBuild files, `.npmrc`, a virtual environment, `package.json` scripts, a flow
+file), which can run programs. Zed keeps tasks and language servers behind
+Restricted Mode for that reason, and Forge's panels must too. Two parts:
+
+- Every place that starts a program asks `forge_trust_gate::check(path)` first
+  (the folder it runs in, or the program itself when the project carries it) and
+  returns its error otherwise. The backends do this in one function each
+  (`run_cargo_output`, `run_dotnet_captured`, `run_npm_cli`, `run_captured`), so a
+  new caller is covered; a new backend or a new `Command::new` needs its own check.
+- `forge_trust::watch_project` (called for every project in `zed.rs`) keeps that
+  gate current, the dock shows "Trust this project to scan it" in place of a panel
+  listed in `PANELS_NEEDING_TRUST` (`workspace/src/dock.rs`), and a panel that
+  scans on its own calls `forge_trust::on_trust_changed` to scan again once the
+  project is trusted. Add a new panel that runs project tooling to that list.
+
 # Panels: every root fills the dock
 
 The dock draws a panel through a cached view, so a root element with no

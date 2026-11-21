@@ -13,6 +13,7 @@ doctest = false
 [dependencies]
 chrono = { workspace = true, features = ["clock"] }
 datalogic-rs.workspace = true
+forge_trust_gate.workspace = true
 futures.workspace = true
 ide_env.workspace = true
 indexmap.workspace = true

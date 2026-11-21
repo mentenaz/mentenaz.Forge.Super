@@ -500,6 +500,12 @@ impl PythonPanel {
             }
             panel.load_managed_versions(cx);
 
+            // Scan again when the project is trusted (or stop when it is not).
+            forge_trust::on_trust_changed(cx, |this: &mut PythonPanel, cx| {
+                this.schedule_project_rescan(cx)
+            })
+            .detach();
+
             panel
         })
     }

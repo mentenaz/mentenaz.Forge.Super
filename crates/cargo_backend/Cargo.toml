@@ -11,6 +11,7 @@ path = "src/cargo_backend.rs"
 doctest = false
 
 [dependencies]
+forge_trust_gate.workspace = true
 gpui_util.workspace = true
 log.workspace = true
 semver.workspace = true

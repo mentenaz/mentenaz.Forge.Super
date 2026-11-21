@@ -664,6 +664,12 @@ impl NodePanel {
             Self::restore_open_sections(cx);
             Self::restore_node_choice(cwd.clone(), cx);
 
+            // Scan again when the project is trusted (or stop when it is not).
+            forge_trust::on_trust_changed(cx, |this: &mut NodePanel, cx| {
+                this.schedule_project_rescan(cx)
+            })
+            .detach();
+
             panel
         })
     }

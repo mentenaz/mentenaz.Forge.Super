@@ -94,6 +94,8 @@ members = [
     "crates/file_finder",
     "crates/file_icons",
     "crates/flows_panel",
+    "crates/forge_trust",
+    "crates/forge_trust_gate",
     "crates/fs",
     "crates/fs_benchmarks",
     "crates/fuzzy",
@@ -418,6 +420,8 @@ file_content = { path = "crates/file_content" }
 file_finder = { path = "crates/file_finder" }
 file_icons = { path = "crates/file_icons" }
 flows_panel = { path = "crates/flows_panel" }
+forge_trust = { path = "crates/forge_trust" }
+forge_trust_gate = { path = "crates/forge_trust_gate" }
 fs = { path = "crates/fs" }
 fuzzy = { path = "crates/fuzzy" }
 fuzzy_nucleo = { path = "crates/fuzzy_nucleo" }

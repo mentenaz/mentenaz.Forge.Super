@@ -38,6 +38,7 @@ collections.workspace = true
 component.workspace = true
 db.workspace = true
 dirs.workspace = true
+forge_trust.workspace = true
 futures-lite.workspace = true
 fs.workspace = true
 futures.workspace = true

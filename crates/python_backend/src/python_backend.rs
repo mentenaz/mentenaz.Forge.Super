@@ -98,6 +98,11 @@ const MAX_SCAN_DEPTH: usize = 5;
 
 /// Run a command and return stdout (or stderr if stdout is empty).
 fn run_captured(exe: &str, args: &[&str]) -> Result<String, String> {
+    // `exe` is often the project's own virtual environment. It is resolved first
+    // (a bare name through `PATH`) and the file it names is judged, before
+    // anything is spawned, so a program inside a project that is not trusted is
+    // not started.
+    forge_trust_gate::check_program(exe)?;
     let mut c = gpui_util::new_std_command(exe);
     c.args(args);
     #[cfg(target_os = "windows")]

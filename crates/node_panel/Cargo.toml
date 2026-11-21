@@ -15,6 +15,7 @@ doctest = false
 anyhow.workspace = true
 db.workspace = true
 flows_panel.workspace = true
+forge_trust.workspace = true
 fs.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true

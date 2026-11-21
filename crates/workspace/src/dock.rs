@@ -29,6 +29,19 @@ pub(crate) const RESIZE_HANDLE_SIZE: Pixels = px(6.);
 /// divider), so the dock looks the same throughout. It is an allowlist so that a
 /// panel upstream adds later is left as it is, and the Forge panels, which draw
 /// their own header, never get a second one. Remove a key to take a panel off.
+/// Forge panels that run a project's own tooling (cargo, dotnet, npm, python,
+/// scripts, flows). While the project is in Restricted Mode the dock shows a
+/// "Trust this project to scan it" state in place of the panel, the same way
+/// tasks stay out of reach until the project is trusted.
+const PANELS_NEEDING_TRUST: &[&str] = &[
+    "RustPanel",
+    "NodePanel",
+    "DotnetPanel",
+    "PythonPanel",
+    "ScriptRunnerPanel",
+    "FlowsPanel",
+];
+
 const PANELS_WITH_DOCK_HEADER: &[&str] = &[
     "ProjectPanel",
     "OutlinePanel",
@@ -1391,6 +1404,21 @@ impl Render for Dock {
             } else {
                 None
             };
+            let trust_notice = if PANELS_NEEDING_TRUST.contains(&entry.panel.panel_key()) {
+                let project = self
+                    .workspace
+                    .upgrade()
+                    .map(|workspace| workspace.read(cx).project().clone());
+                match project {
+                    Some(project) if forge_trust::project_restricted(&project, cx) => {
+                        let title = entry.panel.icon_tooltip(window, cx).unwrap_or("This panel");
+                        Some(forge_trust::restricted_notice(title, cx).into_any_element())
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             let panel_view = entry
                 .panel
                 .to_any()
@@ -1480,13 +1508,15 @@ impl Render for Dock {
                             Axis::Horizontal => this.w_full().h_full(),
                             Axis::Vertical => this.h_full().w_full(),
                         })
-                        .map(|this| match panel_header {
-                            Some(header) => this.child(
-                                v_flex().size_full().child(header).child(
-                                    div().flex_1().min_h_0().w_full().child(panel_view),
-                                ),
+                        .map(|this| match (trust_notice, panel_header) {
+                            (Some(notice), _) => this.child(notice),
+                            (None, Some(header)) => this.child(
+                                v_flex()
+                                    .size_full()
+                                    .child(header)
+                                    .child(div().flex_1().min_h_0().w_full().child(panel_view)),
                             ),
-                            None => this.child(panel_view),
+                            (None, None) => this.child(panel_view),
                         }),
                 )
                 .when(self.resizable(cx), |this| {

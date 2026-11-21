@@ -460,6 +460,15 @@ pub fn fmt_downloads(n: u64) -> String {
 /// `dotnet list package` surfaces "must restore first" / "unrecognized
 /// project" style failures).
 fn run_dotnet_captured(args: &[&str], cwd: &str) -> Result<String, String> {
+    // `dotnet` evaluates the project's own build files, which can run programs,
+    // so it only runs in a project that is trusted.
+    forge_trust_gate::check(cwd)?;
+    run_dotnet_unchecked(args, cwd)
+}
+
+/// [`run_dotnet_captured`] without the trust check, for `dotnet --version`, which
+/// runs in the process's own folder and reads no project.
+fn run_dotnet_unchecked(args: &[&str], cwd: &str) -> Result<String, String> {
     let mut c = gpui_util::new_std_command("dotnet");
     c.args(args).current_dir(cwd);
     #[cfg(target_os = "windows")]
@@ -524,7 +533,7 @@ pub fn query_runtime(_exe: String) -> Result<String, String> {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
-    run_dotnet_captured(&["--version"], &cwd)
+    run_dotnet_unchecked(&["--version"], &cwd)
 }
 
 /// Outdated packages (`dotnet list package --outdated --format json`), run

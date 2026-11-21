@@ -854,6 +854,8 @@ pub async fn fetch_all_vulnerabilities(
 /// rather than a program + args list, so it runs through the system shell:
 /// `cmd /C` on Windows, `sh -c` elsewhere (there is no `cmd` there).
 fn run_shell_sync(command: &str, cwd: &str) -> Result<String, String> {
+    // The command runs in the project's folder, so only in a trusted project.
+    forge_trust_gate::check(cwd)?;
     #[cfg(target_os = "windows")]
     let mut c = {
         use std::os::windows::process::CommandExt as _;

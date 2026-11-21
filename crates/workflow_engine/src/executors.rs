@@ -562,6 +562,10 @@ async fn run_script_process(
     working_dir: Option<&Path>,
     env: &[(String, String)],
 ) -> Result<Map<String, Value>, String> {
+    // The script and the folder it runs in come from the project's flow file.
+    if let Some(working_dir) = working_dir {
+        forge_trust_gate::check(working_dir)?;
+    }
     let mut cmd = TokioCommand::new(program);
     if let Some(context_file) = context_file {
         cmd.env(SCRIPT_CONTEXT_ENV, context_file);
@@ -1296,6 +1300,11 @@ async fn execute_start_process(
                     "[workflow StartProcess] stopped {stopped} process(es) that an earlier run of \"{action_id}\" left running"
                 );
             }
+        }
+
+        // The command and the folder come from the project's flow file.
+        if let Some(cwd) = &cwd {
+            forge_trust_gate::check(cwd)?;
         }
 
         #[cfg(target_os = "windows")]

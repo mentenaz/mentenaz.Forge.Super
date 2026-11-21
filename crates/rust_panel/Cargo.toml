@@ -14,6 +14,7 @@ doctest = false
 anyhow.workspace = true
 cargo_backend.workspace = true
 cargo_manager_panel.workspace = true
+forge_trust.workspace = true
 fs.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true

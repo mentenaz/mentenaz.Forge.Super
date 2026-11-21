@@ -446,6 +446,12 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
     init_reduce_motion(cx);
     init_global_config_error_notifications(cx);
 
+    // Forge's panels run a project's own tooling (cargo, dotnet, npm, python,
+    // scripts), so the trust gate is switched on before any project opens: each
+    // project is followed from the moment it exists, and the backends refuse to
+    // start anything in a folder until the editor has marked it trusted.
+    forge_trust::init(cx);
+
     cx.observe_new(|_multi_workspace: &mut MultiWorkspace, window, cx| {
         let Some(window) = window else {
             return;

@@ -140,6 +140,9 @@ pub struct NpmPackageDetails {
     reason = "blocking by design; only called from background threads"
 )]
 pub fn run_npm_cli(project_root: &str, cli_name: &str, args: &[String]) -> Result<String, String> {
+    // The package manager reads the project's own configuration (`.npmrc`,
+    // `package.json`), so it only runs in a project that is trusted.
+    forge_trust_gate::check(project_root)?;
     let make_command = |exe: &str, run_args: &[String]| {
         let mut command = Command::new(exe);
         command

@@ -1,0 +1,17 @@
+[package]
+name = "forge_trust"
+description = "Connects the editor's worktree trust to Forge's panels: publishes the restricted folders to forge_trust_gate, and draws the \"Trust this project to scan it\" state."
+license = "Apache-2.0"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/forge_trust.rs"
+doctest = false
+
+[dependencies]
+forge_trust_gate.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+project.workspace = true

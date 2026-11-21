@@ -3002,6 +3002,7 @@ dependencies = [
 name = "cargo_backend"
 version = "0.1.0"
 dependencies = [
+ "forge_trust_gate",
  "gpui_util",
  "log",
  "semver",
@@ -5703,6 +5704,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 name = "dotnet_backend"
 version = "0.1.0"
 dependencies = [
+ "forge_trust_gate",
  "gpui_util",
  "log",
  "serde",
@@ -5717,6 +5719,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dotnet_backend",
+ "forge_trust",
  "fs",
  "gpui",
  "gpui-component",
@@ -7291,6 +7294,20 @@ name = "foreign-types-shared"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
+
+[[package]]
+name = "forge_trust"
+version = "0.1.0"
+dependencies = [
+ "forge_trust_gate",
+ "gpui",
+ "gpui-component",
+ "project",
+]
+
+[[package]]
+name = "forge_trust_gate"
+version = "0.1.0"
 
 [[package]]
 name = "fork"
@@ -12907,6 +12924,7 @@ name = "node_backend"
 version = "0.1.0"
 dependencies = [
  "dunce",
+ "forge_trust_gate",
  "gpui_util",
  "log",
  "serde",
@@ -12921,6 +12939,7 @@ dependencies = [
  "anyhow",
  "db",
  "flows_panel",
+ "forge_trust",
  "fs",
  "gpui",
  "gpui-component",
@@ -13082,6 +13101,7 @@ dependencies = [
 name = "npm_backend"
 version = "0.1.0"
 dependencies = [
+ "forge_trust_gate",
  "ide_env",
  "log",
  "semver",
@@ -16442,6 +16462,7 @@ dependencies = [
 name = "python_backend"
 version = "0.1.0"
 dependencies = [
+ "forge_trust_gate",
  "gpui_util",
  "log",
  "serde",
@@ -16455,6 +16476,7 @@ name = "python_manager_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "forge_trust_gate",
  "futures 0.3.34",
  "gpui",
  "gpui-component",
@@ -16475,6 +16497,7 @@ name = "python_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "forge_trust",
  "fs",
  "gpui",
  "gpui-component",
@@ -17825,6 +17848,7 @@ dependencies = [
  "anyhow",
  "cargo_backend",
  "cargo_manager_panel",
+ "forge_trust",
  "fs",
  "gpui",
  "gpui-component",
@@ -18241,6 +18265,7 @@ name = "script_runner_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "forge_trust_gate",
  "fs",
  "gpui",
  "gpui-component",
@@ -24775,6 +24800,7 @@ version = "0.1.1"
 dependencies = [
  "chrono",
  "datalogic-rs",
+ "forge_trust_gate",
  "futures 0.3.34",
  "ide_env",
  "indexmap 2.14.2",
@@ -24806,6 +24832,7 @@ dependencies = [
  "component",
  "db",
  "dirs",
+ "forge_trust",
  "fs",
  "futures 0.3.34",
  "futures-lite 2.6.1",
@@ -25415,6 +25442,7 @@ dependencies = [
  "feedback",
  "file_finder",
  "flows_panel",
+ "forge_trust",
  "fs",
  "futures 0.3.34",
  "git",

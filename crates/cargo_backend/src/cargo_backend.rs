@@ -98,6 +98,11 @@ fn run_cargo(args: &[&str], cwd: Option<&str>) -> Result<String, String> {
 /// reports what it did there, not on stdout.
 #[allow(clippy::disallowed_methods)]
 fn run_cargo_output(args: &[&str], cwd: Option<&str>) -> Result<(String, String), String> {
+    // `cargo` reads the project's own configuration (`.cargo/config.toml` can name
+    // a compiler wrapper), so it only runs in a project that is trusted.
+    if let Some(cwd) = cwd {
+        forge_trust_gate::check(cwd)?;
+    }
     let mut command = gpui_util::new_std_command("cargo");
     command.args(args);
     if let Some(cwd) = cwd {

@@ -1,0 +1,11 @@
+[package]
+name = "forge_trust_gate"
+description = "Which project folders are not trusted yet, so the backends that run cargo, dotnet, npm, python and scripts for Forge's panels can refuse to start anything from one."
+license = "Apache-2.0"
+edition.workspace = true
+version = "0.1.0"
+publish = false
+
+[lib]
+path = "src/forge_trust_gate.rs"
+doctest = false
