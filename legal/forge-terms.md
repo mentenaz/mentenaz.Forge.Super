@@ -15,7 +15,7 @@ Draft v0.1. A qualified lawyer should review it before release. Text in [square 
 
 ## 1. What these terms cover
 
-These terms apply to your use of Forge, including its editor, code-analysis engine, template engine and the command-line tools that come with them (together, "Forge"). They are between you and [publisher legal name], [country] ("we"). By choosing "Accept" in the app you agree to them. If you do not agree, do not use Forge. Forge's source code is licensed separately under [licence name]; for the code itself, that licence applies where it differs from these terms.
+These terms apply to your use of Forge, including its editor, code-analysis engine, template engine and the command-line tools that come with them (together, "Forge"). They are between you and Francois Jacobus Huyzers, South Africa ("we"). By choosing "Accept" in the app you agree to them. If you do not agree, do not use Forge. Forge's source code is licensed separately under [licence name]; for the code itself, that licence applies where it differs from these terms.
 
 ## 2. Using Forge
 
