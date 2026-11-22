@@ -1,6 +1,6 @@
 # Forge Terms of Use (draft v0.1)
 
-21 Nov 2026 · @Francois
+22 Nov 2026 · Francois Jacobus Huyzers
 
 ## Key points
 
@@ -31,17 +31,21 @@ The template engine creates files from templates, including templates written by
 
 You decide what to open, install, run or trust. Opening a folder, installing dependencies or applying a template can run code, including code written by third parties. Forge's warnings and restricted mode reduce some risk but do not remove it. We are not responsible for what code, templates or dependencies you choose to run, or for loss or damage that results. Run unknown code only in an isolated environment that you control. Where Forge offers to run code in a virtual machine, you provide that machine and you are responsible for setting it up and keeping it isolated.
 
-## 5. No warranty and 6. Limits of liability
+## 5. No warranty
 
 Forge is free, open-source software. You use it, and any code you analyse, open or run with it, at your own risk. Forge is provided "as is" and "as available", without warranties of any kind, express or implied. That includes any promise that it is error-free, secure, or fit for a particular purpose.
 
+## 6. Limits of liability
+
 To the extent the law allows, we are not liable for indirect or consequential loss, for loss of data, profit or business, or for damage caused by code you analyse, open or run, or by relying on a report. Where the law does not allow a liability to be excluded (for example for intent, gross negligence, or rights that consumer law protects), nothing in these terms excludes it. Because Forge is free, our total liability, to the extent the law allows, is limited to the amount you paid us for Forge, which is nothing if you did not pay. The disclaimer of warranty and limitation of liability in the GNU General Public License also apply to the code. [Lawyer to confirm this limit.]
 
-## 7. Open-source and third-party software, and 8. Privacy
+## 7. Open-source and third-party software
 
 Forge includes open-source and third-party software under their own licences, listed in the app (under View Dependency Licenses) and in the file THIRD-PARTY-NOTICES.md that comes with the analysis engine. We are not responsible for third-party code, packages, templates or websites. Downloading Forge through our website or a package manager is also governed by those services' own terms.
 
-Forge is not affiliated with, endorsed by or sponsored by Zed Industries, Microsoft, GitHub or any other company whose products or names Forge works with or mentions. Those names are trademarks of their owners and are used only to identify them. Forge may be based on or include open-source software, including parts of the Zed editor, used under its open-source licences. Each Forge crate states its own licence in its Cargo.toml: most are under the GNU General Public License, version 3 or later, some under the Apache License 2.0, and one under the MIT licence. [Lawyer to confirm this statement.]
+Forge is not affiliated with, endorsed by or sponsored by Zed Industries, Microsoft, GitHub or any other company whose products or names Forge works with or mentions. Those names are trademarks of their owners and are used only to identify them. Forge may be based on or include open-source software, including parts of the Zed editor, used under its open-source licences. Each Forge crate, apart from two small example projects, states its own licence in its Cargo.toml: most are under the GNU General Public License, version 3 or later, some under the Apache License 2.0, and one under the MIT licence. [Lawyer to confirm this statement.]
+
+## 8. Privacy
 
 Forge works without an account and does not send your code, projects, reports or usage to us. It stores one small file on your computer recording which version of these terms you accepted, and when. If a feature ever sends data anywhere, it will say so clearly before you use it.
 
@@ -51,10 +55,12 @@ When you submit a pull request, template or other contribution, you confirm that
 
 Contributions may be checked automatically by Forge's own analysis, including runs in an isolated environment, and reviewed by people before they are accepted. Passing an automated check does not guarantee that a contribution is safe, and a maintainer can decline any contribution for any reason. Do not submit code meant to harm, deceive or collect data without clear disclosure. We may reject such contributions and block the contributor. We are not responsible for contributions made by others.
 
-## 10. Changes to these terms, and 11. Governing law and contact
+## 10. Changes to these terms
 
 We may update these terms. Each version has a number and a date. After an update, the app shows a notice. When a change is significant, for example new risks, new handling of data or a new feature that runs code, the app asks you to accept again before you continue. Continuing to use Forge after a minor change means you accept it.
 
+## 11. Governing law and contact
+
 These terms are governed by the law of [country, to be confirmed with a lawyer], and the courts of [place] can decide disputes. This does not take away rights that mandatory consumer law gives you where you live.
 
-Contact: mentenaz@outlook.de. Version 0.1, [date].
+Contact: mentenaz@outlook.de. Draft version 0.1, 22 Nov 2026. [The release date is set when these terms first ship.]
