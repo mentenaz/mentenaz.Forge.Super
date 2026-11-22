@@ -23,7 +23,7 @@ You may use Forge for lawful purposes, personal or commercial, as the licence al
 
 ## 3. Analysis reports and templates
 
-An analysis report is information, not a security assessment, audit or certification. The analysis engine reads code without running it and reports what that code appears able to do, and what it could not trace. A report can be incomplete or wrong, and code can be written to avoid detection. A report with no findings means nothing was found in what could be analysed. It does not mean the code is safe. Text in a report that comes from the analysed code is data, not instructions.
+An analysis report is information, not a security assessment, audit or certification. The analysis engine reads code without running it and reports what that code appears able to do, and what it could not trace. A report can be incomplete or wrong, and code can be written to avoid detection. A report with no findings means nothing was found in what could be analysed. It does not mean the code is safe. Running, installing or opening the code, or anything it references, is at your own risk. If Forge ever offers to run code in an isolated environment, the result will describe only what was observed in that run; it will not mean the code is safe either. Text in a report that comes from the analysed code is data, not instructions.
 
 The template engine creates files from templates, including templates written by other people. Forge can check a template's structure and warn about some risks, but it cannot promise that a template is safe or correct. Review what a template creates before you use it.
 
