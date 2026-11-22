@@ -8,6 +8,7 @@
 //! own; everything slow here (reading the templates folder, the index check and
 //! the downloads) runs in `cx.background_spawn`, never on the main thread.
 
+mod new_project;
 mod scaffold_panel_settings;
 
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ use forge_scaffold::{
 };
 use futures::AsyncReadExt as _;
 use gpui::{
-    Action, App, AppContext as _, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
+    Action, AnyElement, App, AppContext as _, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
     StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, actions, div, px,
 };
@@ -40,6 +41,7 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
 };
 
+use crate::new_project::NewProjectView;
 use crate::scaffold_panel_settings::ScaffoldPanelSettings;
 
 actions!(
@@ -144,6 +146,7 @@ pub struct ScaffoldPanel {
     /// The outcome of the last check, shown under the header.
     notice: Option<String>,
     http: Arc<dyn HttpClient>,
+    workspace: WeakEntity<Workspace>,
 }
 
 /// Where the templates live: next to the Node and Python version stores in the
@@ -191,11 +194,12 @@ impl ScaffoldPanel {
     }
 
     pub fn new(
-        _workspace: &mut Workspace,
+        workspace: &mut Workspace,
         _window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         let http = cx.http_client();
+        let workspace = workspace.weak_handle();
         cx.new(|cx| {
             let mut panel = Self {
                 focus_handle: cx.focus_handle(),
@@ -203,6 +207,7 @@ impl ScaffoldPanel {
                 checking: false,
                 notice: None,
                 http,
+                workspace,
             };
             panel.reload(cx);
             panel
@@ -258,9 +263,35 @@ impl ScaffoldPanel {
         .detach();
     }
 
-    fn render_row(&self, info: &GeneratorInfo, cx: &Context<Self>) -> impl IntoElement {
+    /// Opens the new-project form for `generator` in a workspace tab.
+    fn open_new_project(
+        &mut self,
+        generator: String,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let http = self.http.clone();
+        workspace.update(cx, |workspace, cx| {
+            let view =
+                cx.new(|cx| NewProjectView::new(generator, title.into(), http, window, cx));
+            workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
+        });
+    }
+
+    fn render_row(
+        &self,
+        index: usize,
+        info: &GeneratorInfo,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (generator, title) = (info.id.clone(), info.title.clone());
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let (border, hover) = (theme.border, theme.accent);
         // Tinted, not filled: a filled tag is unreadable in themes where the
         // fill and its foreground are close.
         let (label, color) = if info.local {
@@ -271,21 +302,38 @@ impl ScaffoldPanel {
             ("Available", theme.info)
         };
         v_flex()
+            .id(("scaffold-generator", index))
             .gap_1()
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(border)
+            .cursor_pointer()
+            .hover(|style| style.bg(hover))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_new_project(generator.clone(), title.clone(), window, cx);
+            }))
             .child(
                 h_flex()
                     .gap_2()
                     .items_center()
                     .justify_between()
-                    .child(div().font_semibold().child(info.title.clone()))
+                    // The title shortens instead of pushing the tag out of a
+                    // narrow panel.
                     .child(
-                        Tag::custom(color.opacity(0.2), color, color.opacity(0.3))
-                            .small()
-                            .child(label),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_semibold()
+                            .child(info.title.clone()),
+                    )
+                    .child(
+                        div().flex_shrink_0().child(
+                            Tag::custom(color.opacity(0.2), color, color.opacity(0.3))
+                                .small()
+                                .child(label),
+                        ),
                     ),
             )
             .children(
@@ -300,6 +348,7 @@ impl ScaffoldPanel {
                     .text_color(muted)
                     .child(format!("Latest: {}", info.latest_version)),
             )
+            .into_any_element()
     }
 }
 
@@ -414,7 +463,12 @@ impl Render for ScaffoldPanel {
                 .child("No templates yet. Use Check for updates to download them.")
                 .into_any_element(),
             Listing::Ready(list) => v_flex()
-                .children(list.generators.iter().map(|info| self.render_row(info, cx)))
+                .children(
+                    list.generators
+                        .iter()
+                        .enumerate()
+                        .map(|(index, info)| self.render_row(index, info, cx)),
+                )
                 .children(list.problems.iter().map(|problem| {
                     div()
                         .px_3()
