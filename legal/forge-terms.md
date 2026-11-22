@@ -33,9 +33,9 @@ You decide what to open, install, run or trust. Opening a folder, installing dep
 
 ## 5. No warranty and 6. Limits of liability
 
-Forge is provided "as is" and "as available", without warranties of any kind, express or implied. That includes any promise that it is error-free, secure, or fit for a particular purpose.
+Forge is free, open-source software. You use it, and any code you analyse, open or run with it, at your own risk. Forge is provided "as is" and "as available", without warranties of any kind, express or implied. That includes any promise that it is error-free, secure, or fit for a particular purpose.
 
-To the extent the law allows, we are not liable for indirect or consequential loss, for loss of data, profit or business, or for damage caused by code you analyse, open or run, or by relying on a report. Where the law does not allow a liability to be excluded (for example for intent, gross negligence, or rights that consumer law protects), nothing in these terms excludes it. Our total liability is limited to the amount you paid us for Forge, or [amount] if you paid nothing. [Lawyer to confirm this limit.]
+To the extent the law allows, we are not liable for indirect or consequential loss, for loss of data, profit or business, or for damage caused by code you analyse, open or run, or by relying on a report. Where the law does not allow a liability to be excluded (for example for intent, gross negligence, or rights that consumer law protects), nothing in these terms excludes it. Because Forge is free, our total liability, to the extent the law allows, is limited to the amount you paid us for Forge, which is nothing if you did not pay. The disclaimer of warranty and limitation of liability in the GNU General Public License also apply to the code. [Lawyer to confirm this limit.]
 
 ## 7. Open-source and third-party software, and 8. Privacy
 
