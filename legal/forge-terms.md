@@ -15,7 +15,7 @@ Draft v0.1. A qualified lawyer should review it before release. Text in [square 
 
 ## 1. What these terms cover
 
-These terms apply to your use of Forge, including its editor, code-analysis engine, template engine and the command-line tools that come with them (together, "Forge"). They are between you and Francois Jacobus Huyzers, South Africa ("we"). By choosing "Accept" in the app you agree to them. If you do not agree, do not use Forge. Forge's source code is licensed separately under [licence name]; for the code itself, that licence applies where it differs from these terms.
+These terms apply to your use of Forge, including its editor, code-analysis engine, template engine and the command-line tools that come with them (together, "Forge"). They are between you and Francois Jacobus Huyzers, South Africa ("we"). By choosing "Accept" in the app you agree to them. If you do not agree, do not use Forge. Forge's source code is licensed separately under the GNU General Public License, version 3 or later, except where a crate or file states another licence (some are under the Apache License 2.0 or the MIT licence); for the code itself, that licence applies where it differs from these terms.
 
 ## 2. Using Forge
 
@@ -39,15 +39,15 @@ To the extent the law allows, we are not liable for indirect or consequential lo
 
 ## 7. Open-source and third-party software, and 8. Privacy
 
-Forge includes open-source and third-party software under their own licences, listed in [location]. We are not responsible for third-party code, packages, templates or websites. Downloading Forge through our website or a package manager is also governed by those services' own terms.
+Forge includes open-source and third-party software under their own licences, listed in the app (under View Dependency Licenses) and in the file THIRD-PARTY-NOTICES.md that comes with the analysis engine. We are not responsible for third-party code, packages, templates or websites. Downloading Forge through our website or a package manager is also governed by those services' own terms.
 
-Forge is not affiliated with, endorsed by or sponsored by Zed Industries, Microsoft, GitHub or any other company whose products or names Forge works with or mentions. Those names are trademarks of their owners and are used only to identify them. Forge may be based on or include open-source software, including parts of the Zed editor, used under its open-source licences. [Confirm exactly which licences apply to the code Forge includes.]
+Forge is not affiliated with, endorsed by or sponsored by Zed Industries, Microsoft, GitHub or any other company whose products or names Forge works with or mentions. Those names are trademarks of their owners and are used only to identify them. Forge may be based on or include open-source software, including parts of the Zed editor, used under its open-source licences. Each Forge crate states its own licence in its Cargo.toml: most are under the GNU General Public License, version 3 or later, some under the Apache License 2.0, and one under the MIT licence. [Lawyer to confirm this statement. A few crates still state no licence and will be given one.]
 
 Forge works without an account and does not send your code, projects, reports or usage to us. It stores one small file on your computer recording which version of these terms you accepted, and when. If a feature ever sends data anywhere, it will say so clearly before you use it.
 
 ## 9. Contributions and pull requests
 
-When you submit a pull request, template or other contribution, you confirm that you have the right to submit it and you license it to us and to Forge's users under [project licence]. [Decide whether contributors also sign off each commit, for example with a Developer Certificate of Origin.]
+When you submit a pull request, template or other contribution, you confirm that you have the right to submit it and you license it to us and to Forge's users under the licence of the part of Forge you contribute to (the GNU General Public License, version 3 or later, unless the file says otherwise). [Decide whether contributors also sign off each commit, for example with a Developer Certificate of Origin.]
 
 Contributions may be checked automatically by Forge's own analysis, including runs in an isolated environment, and reviewed by people before they are accepted. Passing an automated check does not guarantee that a contribution is safe, and a maintainer can decline any contribution for any reason. Do not submit code meant to harm, deceive or collect data without clear disclosure. We may reject such contributions and block the contributor. We are not responsible for contributions made by others.
 
@@ -57,4 +57,4 @@ We may update these terms. Each version has a number and a date. After an update
 
 These terms are governed by the law of [country, to be confirmed with a lawyer], and the courts of [place] can decide disputes. This does not take away rights that mandatory consumer law gives you where you live.
 
-Contact: [email]. Version 0.1, [date].
+Contact: mentenaz@outlook.de. Version 0.1, [date].
