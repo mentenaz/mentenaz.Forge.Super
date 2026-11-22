@@ -13,6 +13,7 @@ doctest = false
 [dependencies]
 anyhow.workspace = true
 db.workspace = true
+forge_trust_gate.workspace = true
 fs.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true

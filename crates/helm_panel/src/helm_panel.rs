@@ -671,6 +671,10 @@ impl HelmPanel {
             }
             return;
         }
+        if let Err(message) = self.check_publish_trust(cx) {
+            self.notify(message, cx);
+            return;
+        }
         self.open_workspace_modal(
             HelmModalKind::CreateRepo {
                 attach_local: true,

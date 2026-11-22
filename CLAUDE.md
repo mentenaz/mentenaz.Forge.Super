@@ -48,7 +48,8 @@ Restricted Mode for that reason, and Forge's panels must too. Two parts:
 - Every place that starts a program asks `forge_trust_gate::check(path)` first
   (the folder it runs in, or the program itself when the project carries it) and
   returns its error otherwise. The backends do this in one function each
-  (`run_cargo_output`, `run_dotnet_captured`, `run_npm_cli`, `run_captured`), so a
+  (`run_cargo_output`, `run_dotnet_captured`, `run_npm_cli`, `run_captured`, and
+  Helm's `run_git`, which also turns `core.fsmonitor` off), so a
   new caller is covered; a new backend or a new `Command::new` needs its own check.
 - `forge_trust::watch_project` (called for every project in `zed.rs`) keeps that
   gate current, the dock shows "Trust this project to scan it" in place of a panel

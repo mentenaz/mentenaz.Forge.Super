@@ -110,6 +110,10 @@ impl HelmPanel {
             }
             return;
         }
+        if let Err(message) = self.check_publish_trust(cx) {
+            self.notify(message, cx);
+            return;
+        }
         self.open_workspace_modal(HelmModalKind::PublishRepo, window, cx);
     }
 
@@ -121,6 +125,10 @@ impl HelmPanel {
     /// forced, so a repository that already has history of its own makes the
     /// push fail with git's message instead of being overwritten.
     pub(super) fn handle_publish_connect(&mut self, repo: Repo, cx: &mut Context<Self>) {
+        if let Err(message) = self.check_publish_trust(cx) {
+            self.notify(message, cx);
+            return;
+        }
         let Some(root) = self.workspace_root(cx) else {
             self.notify("This window has no folder to publish.", cx);
             return;
@@ -168,6 +176,23 @@ impl HelmPanel {
             .ok();
         })
         .detach();
+    }
+
+    /// Whether the workspace's folder may have `git` run in it: refused for a
+    /// folder in Restricted Mode, with the gate's message. Asked up front, so
+    /// nothing is created on GitHub for a workspace that could not then be
+    /// published; [`run_git`] asks again for every command. A window with no
+    /// folder passes, and is reported by the callers.
+    pub(super) fn check_publish_trust(&self, cx: &mut App) -> Result<(), String> {
+        match self.workspace_root(cx) {
+            Some(root) => forge_trust_gate::check_run(
+                "helm_panel::check_publish_trust",
+                "git",
+                &[],
+                Some(root.as_path()),
+            ),
+            None => Ok(()),
+        }
     }
 
     /// The first directory worktree of this window's workspace: where a
@@ -655,9 +680,18 @@ async fn git_as_account(args: &[&str], cwd: &Path, token: Option<&str>) -> Resul
 /// rejected push, …). Stdin is null, terminal prompts and Git Credential
 /// Manager's windows are turned off, and on Windows no console window is
 /// opened, so a step can never hang waiting for input or pop anything up.
+///
+/// The one place Helm starts `git` in a project folder, so it is also where
+/// the trust gate is asked: a repository's own config and hooks can run
+/// programs (`core.fsmonitor`, `core.sshCommand`, a pre-commit or pre-push
+/// hook), which a folder in Restricted Mode must not be able to start.
 async fn run_git(args: &[&str], cwd: &Path, config: Vec<(String, String)>) -> Result<(), String> {
+    forge_trust_gate::check_run("helm_panel::attach::run_git", "git", args, Some(cwd))?;
     let mut command = tokio::process::Command::new("git");
     command
+        // Never let a repository name a program to ask about changes, as
+        // Zed's own git runner does.
+        .args(["-c", "core.fsmonitor=false"])
         .args(args)
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")

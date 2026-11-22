@@ -197,6 +197,15 @@ impl HelmPanel {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A publish creates the repository on GitHub first and runs `git`
+        // afterwards: refuse before creating anything when the folder is not
+        // trusted (the dialog was open before the answer changed, say).
+        if attach.is_some()
+            && let Err(message) = self.check_publish_trust(cx)
+        {
+            self.notify(message, cx);
+            return;
+        }
         self.pending_attach = attach;
         let mut opts = json!({
             "name": name,

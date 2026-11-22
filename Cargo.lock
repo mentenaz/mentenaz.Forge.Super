@@ -9359,6 +9359,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "db",
+ "forge_trust_gate",
  "fs",
  "gpui",
  "gpui-component",
