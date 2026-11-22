@@ -212,6 +212,7 @@ impl VsCodeSettings {
             script_runner_panel: None,
             database_panel: None,
             processes_panel: None,
+            scaffold_panel: None,
             git: self.git_settings_content(),
             git_panel: self.git_panel_settings_content(),
             git_graph: None,

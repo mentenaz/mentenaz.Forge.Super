@@ -131,7 +131,10 @@ user has looked at it.
    dialog like the Publish dialog. This plan assumes the dock list plus a workspace tab.
 3. **First generators:** SPFx only, or SPFx and Vite React.
 4. **Legacy generator-derived versions:** shown by default with the notice, or hidden until the question is answered.
-5. **Where the templates folder lives**, and whether auto-update is on by default.
+5. **Where the templates folder lives**, and whether auto-update is on by default. *Location decided (phase 1):* in the
+   app's data folder beside the Node and Python version stores (`paths::data_dir()/scaffold_templates`, so an isolated build
+   keeps its own); the engine's `FORGE_TEMPLATES` variable still overrides it. A setting for the location is deferred.
+   Auto-update is still open.
 6. **Panel name and icon** (an SVG to add).
 
 ## Not verified

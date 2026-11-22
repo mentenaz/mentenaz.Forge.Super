@@ -924,6 +924,7 @@ fn main() {
         npm_bootstrap::init(cx);
         script_runner_panel::init(cx);
         processes_panel::init(cx);
+        scaffold_panel::init(cx);
         python_panel::init(cx);
         python_manager_panel::init(cx);
         node_panel::init(cx);

@@ -7296,6 +7296,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
+name = "forge-scaffold"
+version = "0.2.0"
+source = "git+https://github.com/mentenaz/Forge.Scaffold.SDK?tag=v0.2.0#2077c3d42985273a737246ec8f81fe5247334eaa"
+dependencies = [
+ "base64 0.22.1",
+ "dirs",
+ "flate2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "uuid",
+]
+
+[[package]]
 name = "forge_trust"
 version = "0.1.0"
 dependencies = [
@@ -18162,6 +18177,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ece8e78b2f38ec51c51f5d475df0a7187ba5111b2a28bdc761ee05b075d40a71"
 
 [[package]]
+name = "scaffold_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "forge-scaffold",
+ "fs",
+ "futures 0.3.34",
+ "gpui",
+ "gpui-component",
+ "http_client",
+ "paths",
+ "settings",
+ "ui",
+ "workspace",
+]
+
+[[package]]
 name = "scc"
 version = "3.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -25526,6 +25558,7 @@ dependencies = [
  "rust_panel",
  "sandbox",
  "sandbox_linux",
+ "scaffold_panel",
  "script_runner_panel",
  "search",
  "semver",

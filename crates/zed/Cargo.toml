@@ -214,6 +214,7 @@ reqwest_client.workspace = true
 rope.workspace = true
 rust_panel.workspace = true
 sandbox.workspace = true
+scaffold_panel.workspace = true
 script_runner_panel.workspace = true
 search.workspace = true
 serde.workspace = true

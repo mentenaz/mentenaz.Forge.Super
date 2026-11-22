@@ -1146,6 +1146,12 @@
     // Whether to show the processes panel button in the status bar.
     "button": true,
   },
+  "scaffold_panel": {
+    // Whether to show the Scaffold panel button in the status bar.
+    "button": true,
+    // Where to dock the Scaffold panel. Can be 'left' or 'right'.
+    "dock": "left",
+  },
   "collaboration_panel": {
     // Whether to show the collaboration panel button in the status bar. Off:
     // the panel signs in to Zed's collaboration servers, which Forge Super

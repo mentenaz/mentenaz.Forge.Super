@@ -213,6 +213,7 @@ pub struct SettingsContent {
     pub script_runner_panel: Option<DockablePanelSettingsContent>,
     pub database_panel: Option<BottomPanelSettingsContent>,
     pub processes_panel: Option<BottomPanelSettingsContent>,
+    pub scaffold_panel: Option<SidePanelSettingsContent>,
 
     pub call_hierarchy: Option<CallHierarchySettingsContent>,
 
@@ -433,7 +434,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
         title_bar, vim_mode, calls, which_key, vim, modeline_lines, feature_flags,
         instrumentation,
         cockpit_panel, helm_panel, python_panel, node_panel, dotnet_panel, flows_panel,
-        rust_panel, script_runner_panel, database_panel, processes_panel,
+        rust_panel, script_runner_panel, database_panel, processes_panel, scaffold_panel,
     },
     defaults: {},
 });

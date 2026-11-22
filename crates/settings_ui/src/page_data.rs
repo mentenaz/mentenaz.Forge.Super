@@ -7307,6 +7307,7 @@ fn panels_page() -> SettingsPage {
             ported_panel_section!(dotnet_panel, ".NET Panel", ".NET panel", dock),
             ported_panel_section!(flows_panel, "Flows Panel", "Flows panel", dock),
             ported_panel_section!(rust_panel, "Rust Panel", "Rust panel", dock),
+            ported_panel_section!(scaffold_panel, "Scaffold Panel", "Scaffold panel", dock),
         ],
     }
 }
