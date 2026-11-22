@@ -258,6 +258,7 @@ impl HelmPanel {
         self.open_workspace_modal(
             HelmModalKind::CreateRepo {
                 attach_local: false,
+                existing: None,
             },
             window,
             cx,

@@ -6,6 +6,7 @@ use gpui_component::IndexPath;
 use gpui_component::select::{Select, SelectEvent, SelectState};
 
 use super::auth::app_settings_url;
+use super::repo_picker::RepoPicker;
 use super::*;
 
 #[derive(Clone)]
@@ -16,8 +17,15 @@ pub(super) enum HelmModalKind {
     /// new repository instead of only navigating to its detail screen —
     /// see [`HelmPanel::open_create_repo_for_attach`] and
     /// [`HelmPanel::attach_created_repo`].
+    ///
+    /// `existing` is set by the publish dialog's "Create new repo": the
+    /// workspace already is a repository with its own commits, so the form
+    /// leaves out the README, `.gitignore` and commit message, and the new
+    /// repository just gets those commits pushed. It holds the folder's name,
+    /// prefilled as the repository name.
     CreateRepo {
         attach_local: bool,
+        existing: Option<String>,
     },
     EditRepo(Repo),
     AddCollaborator,
@@ -49,6 +57,11 @@ pub(super) enum HelmModalKind {
     /// picking a folder, showing progress, and offering to open the result,
     /// rather than a single submit like every other kind.
     CloneRepo,
+    /// The Git panel's "Publish" when the repository has no remote: pick an
+    /// owner and one of its existing repositories to connect this workspace
+    /// to, or go on to create a new one. Reuses the Owner dropdown of
+    /// `CreateRepo`; see [`HelmPanel::open_publish_dialog`].
+    PublishRepo,
 }
 
 pub(super) struct HelmRepositoryModal {
@@ -99,6 +112,12 @@ pub(super) struct HelmRepositoryModal {
     pub(super) merge_method: usize,
     /// Whether the merge dialog also deletes the head branch.
     pub(super) delete_branch: bool,
+    /// The publish dialog's repository chooser: the chosen owner's
+    /// repositories, searchable and paged.
+    pub(super) picker: RepoPicker,
+    /// The owner whose list is loading or shown, so a slow answer for an
+    /// owner that is no longer chosen is dropped.
+    publish_owner: String,
 }
 
 impl HelmRepositoryModal {
@@ -129,6 +148,10 @@ impl HelmRepositoryModal {
             HelmModalKind::CommitIdentity { name, email, .. } => {
                 (name.clone(), String::new(), email.clone(), String::new())
             }
+            HelmModalKind::CreateRepo {
+                existing: Some(folder),
+                ..
+            } => (folder.clone(), String::new(), String::new(), String::new()),
             HelmModalKind::EditPull { title, .. } => {
                 (title.clone(), String::new(), String::new(), String::new())
             }
@@ -200,7 +223,7 @@ impl HelmRepositoryModal {
         let organization_sub = cx.subscribe_in(
             &organization_select,
             window,
-            move |_, _, event: &SelectEvent<Vec<String>>, window, cx| {
+            move |this, _, event: &SelectEvent<Vec<String>>, window, cx| {
                 let SelectEvent::Confirm(choice) = event;
                 // The account itself is a blank organisation.
                 let organization = choice
@@ -214,9 +237,30 @@ impl HelmRepositoryModal {
                 organization_for_sub.update(cx, |input, cx| {
                     input.set_value(organization, window, cx);
                 });
+                if matches!(this.kind, HelmModalKind::PublishRepo) {
+                    if let Some(owner) = choice.clone() {
+                        this.load_publish_repos(owner, window, cx);
+                    }
+                }
                 cx.notify();
             },
         );
+
+        // The first list is the signed-in account's own. Started from a task
+        // because the constructor runs while the panel is leased and cannot
+        // read it.
+        if matches!(kind, HelmModalKind::PublishRepo) {
+            if let Some(login) = account_login.clone() {
+                cx.spawn_in(window, async move |this, cx| {
+                    this.update_in(cx, |this, window, cx| {
+                        this.load_publish_repos(login, window, cx)
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+        let picker = RepoPicker::new(window, cx);
 
         Self {
             kind,
@@ -261,7 +305,45 @@ impl HelmRepositoryModal {
             permission: 0,
             merge_method: 0,
             delete_branch: false,
+            picker,
+            publish_owner: String::new(),
         }
+    }
+
+    /// Loads `owner`'s repositories into the publish dialog's list. The
+    /// account itself is asked as `self`, which also lists its private
+    /// repositories; an organisation by its login.
+    fn load_publish_repos(&mut self, owner: String, window: &mut Window, cx: &mut Context<Self>) {
+        let is_account = self
+            .account_login
+            .as_deref()
+            .is_some_and(|login| login.eq_ignore_ascii_case(&owner));
+        let query = if is_account { "self".to_string() } else { owner.clone() };
+        self.publish_owner = owner.clone();
+        self.picker.start_loading();
+        cx.notify();
+
+        let parent = self.parent.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let gh_state = parent.read_with(cx, |panel, _| panel.gh_state.clone());
+            let result = on_tokio(async move { gh_get_repos(query, &gh_state).await })
+                .await
+                .map_err(|error| error.to_string());
+            this.update(cx, |this, cx| {
+                if this.publish_owner != owner {
+                    return;
+                }
+                this.picker.finish(result);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The repository chosen in the publish dialog, if any.
+    fn selected_publish_repo(&self) -> Option<Repo> {
+        self.picker.selected_repo()
     }
 
     pub(super) fn title(&self) -> &'static str {
@@ -277,6 +359,7 @@ impl HelmRepositoryModal {
             HelmModalKind::EditProfile(_) => "Edit profile",
             HelmModalKind::CommitIdentity { .. } => "Commit name and email",
             HelmModalKind::CloneRepo => "Clone repository",
+            HelmModalKind::PublishRepo => "Publish to GitHub",
         }
     }
 }
@@ -302,7 +385,10 @@ impl Render for HelmRepositoryModal {
         let show_footer = !matches!(confirm_kind, HelmModalKind::CloneRepo);
 
         let content = match &kind {
-            HelmModalKind::CreateRepo { attach_local } => v_form()
+            HelmModalKind::CreateRepo {
+                attach_local,
+                existing,
+            } => v_form()
                 .child(field().label("Name").child(Input::new(&self.name)))
                 .child(field().label("Description").child(Input::new(&self.description)))
                 .child(
@@ -348,7 +434,12 @@ impl Render for HelmRepositoryModal {
                         })),
                     ),
                 )
-                .when(*attach_local, |form| {
+                .when(existing.is_some(), |form| {
+                    form.child(field().child(div().text_xs().text_color(muted).child(
+                        "Your existing commits are pushed as they are. Nothing new is committed.",
+                    )))
+                })
+                .when(*attach_local && existing.is_none(), |form| {
                     form.child(
                         field().child(
                             Switch::new("helm-modal-gitignore")
@@ -378,6 +469,42 @@ impl Render for HelmRepositoryModal {
                     )
                 })
                 .into_any_element(),
+            HelmModalKind::PublishRepo => {
+                v_form()
+                    .child(
+                        field().label("Owner").child(
+                            Select::new(&self.organization_select)
+                                .placeholder("Choose an owner")
+                                .search_placeholder("Search…"),
+                        ),
+                    )
+                    .child(field().label("Repository").child(self.picker.render(cx)))
+                    .child(
+                        field().child(
+                            h_flex()
+                                .gap_2()
+                                .items_center()
+                                .child(div().text_sm().text_color(muted).child("No repository for this yet?"))
+                                .child(
+                                    Button::new("helm-publish-create-new")
+                                        .outline()
+                                        .label("Create new repo")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let parent = this.parent.clone();
+                                            cx.emit(DismissEvent);
+                                            // Opened after this dialog has gone, not from
+                                            // inside its own click handler.
+                                            cx.defer_in(window, move |_, window, cx| {
+                                                parent.update(cx, |panel, cx| {
+                                                    panel.handle_publish_create_new(window, cx);
+                                                });
+                                            });
+                                        })),
+                                ),
+                        ),
+                    )
+                    .into_any_element()
+            }
             HelmModalKind::EditRepo(repo) => v_form()
                 .child(field().label("Name").child(Input::new(&self.name)))
                 .child(field().label("Description").child(Input::new(&self.description)))
@@ -755,11 +882,15 @@ impl Render for HelmRepositoryModal {
             let commit_message = this.commit_message.read(cx).value().trim().to_string();
 
             match kind {
-                HelmModalKind::CreateRepo { attach_local } => {
+                HelmModalKind::CreateRepo {
+                    attach_local,
+                    existing,
+                } => {
                     let attach = attach_local.then_some(CreateRepoAttach {
                         message: commit_message,
                         readme,
                         gitignore,
+                        existing: existing.is_some(),
                     });
                     parent.update(cx, |this, cx| {
                         this.handle_create_repo(
@@ -874,6 +1005,13 @@ impl Render for HelmRepositoryModal {
                 // (see below) — its own content has its own buttons/handlers,
                 // each dismissing explicitly where appropriate.
                 HelmModalKind::CloneRepo => return,
+                HelmModalKind::PublishRepo => {
+                    // Nothing chosen yet: stay open rather than dismiss.
+                    let Some(repo) = this.selected_publish_repo() else {
+                        return;
+                    };
+                    parent.update(cx, |this, cx| this.handle_publish_connect(repo, cx));
+                }
             }
             cx.emit(DismissEvent);
         });
@@ -915,6 +1053,7 @@ impl Render for HelmRepositoryModal {
                                     HelmModalKind::EditProfile(_) => "Save",
                                     HelmModalKind::CommitIdentity { .. } => "Save",
                                     HelmModalKind::CloneRepo => "Clone",
+                                    HelmModalKind::PublishRepo => "Connect",
                                 })
                                 .on_click(confirm),
                         ),

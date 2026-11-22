@@ -292,6 +292,32 @@ fn sync_gpui_component_theme(cx: &mut App) {
     theme.chart_bullish = status.success;
     theme.chart_bearish = status.error;
 
+    // `primary` above is the editor's accent colour, so what is drawn on it
+    // and how it reacts must follow it too: left at the preset's values, a
+    // primary button's label can be close to its fill in a theme whose accent
+    // is light, and its hover is a different hue. The label is whichever of
+    // the theme's background and text colours stands further from the fill.
+    let on_primary = if (colors.text_accent.l - colors.background.l).abs()
+        >= (colors.text_accent.l - colors.text.l).abs()
+    {
+        colors.background
+    } else {
+        colors.text
+    };
+    theme.primary_foreground = on_primary;
+    theme.primary_hover = colors.text_accent.opacity(0.85);
+    theme.primary_active = colors.text_accent.opacity(0.7);
+    // Outline and ghost buttons, list rows and menu items show hover with
+    // `accent`; the editor's own hover colour for an element.
+    theme.accent = colors.element_hover;
+    theme.accent_foreground = colors.text;
+    // Secondary buttons are the editor's ordinary element: its resting,
+    // hover and pressed backgrounds, with the normal text colour.
+    theme.secondary = colors.element_background;
+    theme.secondary_hover = colors.element_hover;
+    theme.secondary_active = colors.element_active;
+    theme.secondary_foreground = colors.text;
+
     // `theme.tokens` is a *snapshot* of `theme.colors` taken once by
     // `Theme::change`/`Theme::from` (`ThemeTokens::from(colors)`) — it isn't
     // live-derived, so the field-by-field overrides above (written through

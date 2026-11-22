@@ -60,6 +60,8 @@ use gpui::{
     TaskExt, TextStyle, UniformListScrollHandle, WeakEntity, actions, anchored, deferred,
     uniform_list,
 };
+use gpui_component::IconName as GpuiIconName;
+use gpui_component::button::{Button as GpuiButton, ButtonVariants as _};
 use gpui_component::chart::{BarChart, LineChart};
 use gpui_component::plot::shape::BarAlignment;
 use gpui_component::{Sizable as _, Theme as GpuiComponentTheme, avatar::Avatar as GpuiAvatar};
@@ -550,6 +552,20 @@ fn git_panel_view_options_menu(
             })
     })
 }
+
+// Fork: the error `get_remote` returns when the repository has no remote at
+// all, as opposed to the user dismissing the remote picker. Push answers it
+// by opening Helm's "Publish to GitHub" dialog; pull ignores it.
+#[derive(Debug)]
+struct NoRemotes;
+
+impl std::fmt::Display for NoRemotes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "This repository has no remote")
+    }
+}
+
+impl std::error::Error for NoRemotes {}
 
 // We only allow a single remote operation at a time to avoid concurrent
 // credential prompts and competing ref/working-tree updates.
@@ -5237,10 +5253,10 @@ impl GitPanel {
         .detach();
     }
 
-    /// The empty state's "Using Helm" button: asks the Helm (GitHub) panel
-    /// to open its Create-repository dialog in attach mode — creating the
-    /// repository on GitHub *and* wiring this workspace up to it, instead
-    /// of just `git init` like "Using zed" does. Helm owns the auth check,
+    /// The empty state's "Create on GitHub" button: asks the Helm (GitHub)
+    /// panel to open its Create-repository dialog in attach mode — creating
+    /// the repository on GitHub *and* wiring this workspace up to it,
+    /// instead of just `git init` like "Initialize repository" does. Helm owns the auth check,
     /// the dialog, and the post-create wiring; the Git panel picks the new
     /// repository up through the normal project refresh once `git init`
     /// lands on disk.
@@ -5255,6 +5271,20 @@ impl GitPanel {
             return;
         };
         helm.update(cx, |helm, cx| helm.open_create_repo_for_attach(window, cx));
+    }
+
+    /// Publish with no remote: asks the Helm (GitHub) panel to open its
+    /// "Publish to GitHub" dialog. Helm owns the sign-in check and the
+    /// connecting; see `HelmPanel::open_publish_dialog`.
+    fn open_helm_publish(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(helm) = workspace.read(cx).panel::<helm_panel::HelmPanel>(cx) else {
+            log::warn!("git panel: Helm panel unavailable for publish");
+            return;
+        };
+        helm.update(cx, |helm, cx| helm.open_publish_dialog(window, cx));
     }
 
     pub(crate) fn pull(&mut self, rebase: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -5287,6 +5317,8 @@ impl GitPanel {
                 Ok(None) => {
                     return Ok(());
                 }
+                // Nothing to pull from, as before.
+                Err(e) if e.is::<NoRemotes>() => return Ok(()),
                 Err(e) => {
                     log::error!("Failed to get current remote: {}", e);
                     this.update(cx, |this, cx| this.show_error_toast("pull", e, cx))
@@ -5381,6 +5413,13 @@ impl GitPanel {
                         )
                     })
                     .ok();
+                    return Ok(());
+                }
+                // Publishing a repository with no remote: Helm's dialog
+                // connects it to an existing GitHub repository or creates one.
+                Err(e) if e.is::<NoRemotes>() => {
+                    this.update_in(cx, |this, window, cx| this.open_helm_publish(window, cx))
+                        .ok();
                     return Ok(());
                 }
                 Err(e) => {
@@ -5606,6 +5645,9 @@ impl GitPanel {
                 .into_iter()
                 .map(|remotes| remotes.name)
                 .collect();
+            if current_remotes.is_empty() {
+                return Err(anyhow::Error::new(NoRemotes));
+            }
             let selection = cx
                 .update(|window, cx| {
                     picker_prompt::prompt(
@@ -8955,42 +8997,61 @@ impl GitPanel {
             .visible_worktrees(cx)
             .any(|worktree| !worktree.read(cx).is_single_file());
         if worktree_count > 0 && self.active_repository.is_none() {
+            // Fork: two choices named by what they do. A local repository
+            // is a complete choice on its own (no remote, no commit), so it
+            // comes first and is the prominent one.
             v_flex()
-                .gap_1()
+                .gap_3()
                 .items_center()
-                .child(Label::new("No Git Repositories").color(Color::Muted))
+                .px_4()
+                .child(
+                    Label::new("This folder is not a Git repository yet").color(Color::Muted),
+                )
                 .when(has_directory_worktree, |this| {
                     this.child(
-                        Label::new("Would you like to create a repository in this space?")
-                            .color(Color::Muted),
+                        v_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(
+                                GpuiButton::new("git-initialize")
+                                    .primary()
+                                    .icon(GpuiIconName::Git)
+                                    .label("Initialize repository")
+                                    .tooltip("git init: a local repository, no remote")
+                                    .on_click(|_, _, cx| {
+                                        cx.defer(|cx| {
+                                            cx.dispatch_action(&git::Init);
+                                        })
+                                    }),
+                            )
+                            .child(
+                                Label::new("Local only. Add a remote later, or never.")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            ),
                     )
                     .child(
-                        h_flex().gap_1().child(
-                            Button::new("using_zed", "Using zed")
-                                .label_size(LabelSize::Small)
-                                .style(ButtonStyle::Outlined)
-                                .tooltip(Tooltip::for_action_title_in(
-                                    "git init",
-                                    &git::Init,
-                                    &self.focus_handle,
-                                ))
-                                .on_click(move |_, _, cx| {
-                                    cx.defer(move |cx| {
-                                        cx.dispatch_action(&git::Init);
-                                    })
-                                }),
-                        )
-                        .child(
-                            Button::new("using_helm", "Using Helm")
-                                .label_size(LabelSize::Small)
-                                .style(ButtonStyle::Outlined)
-                                .tooltip(Tooltip::text(
-                                    "Create a GitHub repository with Helm and push this workspace to it",
-                                ))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_helm_create_repo(window, cx);
-                                })),
-                        ),
+                        v_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(
+                                GpuiButton::new("git-create-on-github")
+                                    .outline()
+                                    .icon(GpuiIconName::Github)
+                                    .label("Create on GitHub")
+                                    .tooltip(
+                                        "Create a GitHub repository with Helm and push this \
+                                         folder to it",
+                                    )
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_helm_create_repo(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Label::new("Creates the repository on GitHub and pushes to it.")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            ),
                     )
                 })
                 .into_any_element()

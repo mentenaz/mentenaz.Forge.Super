@@ -42,6 +42,10 @@ pub(super) struct CreateRepoAttach {
     pub(super) readme: bool,
     /// Write a default `.gitignore` when the workspace has none.
     pub(super) gitignore: bool,
+    /// The workspace already is a repository with commits of its own (the
+    /// publish dialog's "Create new repo"): the new repository is connected
+    /// and pushed to as it is, and the three fields above are not used.
+    pub(super) existing: bool,
 }
 
 /// A failed step of the local wiring, tagged with whether the repository
@@ -88,6 +92,115 @@ fn identity_for(
 }
 
 impl HelmPanel {
+    /// Opens the "Publish to GitHub" dialog the Git panel's Publish button
+    /// uses when the repository has no remote. Without a GitHub login it
+    /// reports a toast and sends the user to the Helm panel, as
+    /// [`Self::open_create_repo_for_attach`] does.
+    pub fn open_publish_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.account.is_empty() {
+            self.notify(
+                "Sign in to GitHub from the Helm panel to publish this repository. For another \
+                 host, add a remote with \"Create Remote Repository\" in the branch picker.",
+                cx,
+            );
+            if let Some(workspace) = self.workspace.upgrade() {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.focus_panel::<HelmPanel>(window, cx);
+                });
+            }
+            return;
+        }
+        self.open_workspace_modal(HelmModalKind::PublishRepo, window, cx);
+    }
+
+    /// The publish dialog's Connect: adds the chosen repository as `origin`
+    /// and pushes, without forcing.
+    ///
+    /// Unlike the Create flow this never runs `git init`, `git add` or a
+    /// commit: the repository and its commits are the user's own. Nothing is
+    /// forced, so a repository that already has history of its own makes the
+    /// push fail with git's message instead of being overwritten.
+    pub(super) fn handle_publish_connect(&mut self, repo: Repo, cx: &mut Context<Self>) {
+        let Some(root) = self.workspace_root(cx) else {
+            self.notify("This window has no folder to publish.", cx);
+            return;
+        };
+        let Some(login) = self.signed_in_login().map(str::to_string) else {
+            self.notify("Helm is no longer signed in, so it cannot publish this workspace.", cx);
+            return;
+        };
+        let saved = saved_identity(&login, cx);
+
+        self.notify(format!("Connecting this workspace to {}…", repo.full_name), cx);
+        let gh_state = self.gh_state.clone();
+        let url = repo.clone_url;
+        let full_name = repo.full_name;
+        let retry_root = root.clone();
+        cx.spawn(async move |this, cx| {
+            let token = gh_state.token().await;
+            let result = match account_identity(&gh_state, &login, &root, saved, cx).await {
+                Ok(identity) => {
+                    on_tokio(async move {
+                        connect_workspace(&root, &url, &identity, token.as_deref()).await
+                    })
+                    .await
+                }
+                Err(error) => Err(AttachFailure {
+                    local_repo: false,
+                    message: format!("Could not read the account's commit identity: {error}"),
+                }),
+            };
+            this.update(cx, |this, cx| match result {
+                Ok(()) => this.notify(format!("Connected to {full_name} and pushed this workspace"), cx),
+                Err(AttachFailure {
+                    local_repo: true,
+                    message,
+                }) => this.notify_push_failed(
+                    format!("{} — the remote was kept.", explain_push_error(message)),
+                    retry_root,
+                    cx,
+                ),
+                Err(AttachFailure {
+                    local_repo: false,
+                    message,
+                }) => this.notify(message, cx),
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The first directory worktree of this window's workspace: where a
+    /// repository is created or connected.
+    fn workspace_root(&self, cx: &mut App) -> Option<PathBuf> {
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace
+                    .worktrees(cx)
+                    .find(|worktree| !worktree.read(cx).is_single_file())
+                    .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+            })
+            .ok()
+            .flatten()
+    }
+
+    /// The publish dialog's "Create new repo": the Create dialog in its
+    /// existing-repository mode.
+    pub(super) fn handle_publish_create_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let folder = self
+            .workspace_root(cx)
+            .and_then(|root| root.file_name().map(|name| name.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+        self.open_workspace_modal(
+            HelmModalKind::CreateRepo {
+                attach_local: true,
+                existing: Some(folder),
+            },
+            window,
+            cx,
+        );
+    }
+
     /// The follow-up to a `CreateRepo { attach_local: true }` run: creates
     /// the requested local files, initializes the workspace's first
     /// directory worktree as a Git repository, commits everything (the
@@ -102,17 +215,7 @@ impl HelmPanel {
         attach: CreateRepoAttach,
         cx: &mut Context<Self>,
     ) {
-        let root = self
-            .workspace
-            .update(cx, |workspace, cx| {
-                workspace
-                    .worktrees(cx)
-                    .find(|worktree| !worktree.read(cx).is_single_file())
-                    .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
-            })
-            .ok()
-            .flatten();
-        let Some(root) = root else {
+        let Some(root) = self.workspace_root(cx) else {
             self.notify(
                 format!(
                     "Created {} on GitHub, but this window has no folder to attach it to.",
@@ -134,17 +237,7 @@ impl HelmPanel {
             );
             return;
         };
-        // The account's saved commit identity, if it has one.
-        let saved = HelmPanelSettings::get_global(cx)
-            .account(&login)
-            .and_then(|account| {
-                let email = account.git_email.clone()?;
-                let name = account
-                    .git_name
-                    .clone()
-                    .unwrap_or_else(|| account.display_name().to_string());
-                Some(Identity { name, email })
-            });
+        let saved = saved_identity(&login, cx);
 
         self.notify(format!("Publishing {} to GitHub…", repo.name), cx);
         let fs = <dyn fs::Fs>::global(cx);
@@ -159,52 +252,26 @@ impl HelmPanel {
         let created = name.clone();
         cx.spawn(async move |this, cx| {
             let token = gh_state.token().await;
-            let identity = match saved {
-                Some(identity) => Ok(identity),
-                None => {
-                    let gh_state = gh_state.clone();
-                    let root = root.clone();
-                    // Off the main thread: two API calls and two `git`s.
-                    let identity = on_tokio(async move {
-                        let user = gh_get_current_user(&gh_state).await?;
-                        // A token without the `user` scope cannot read them.
-                        let emails = gh_get_verified_emails(&gh_state).await.unwrap_or_default();
-                        Ok::<_, GhError>(identity_for(
-                            &user.login,
-                            user.id,
-                            user.name.as_deref(),
-                            &emails,
-                            git_config(&root, "--global", "user.name"),
-                            git_config(&root, "--global", "user.email"),
-                        ))
-                    })
-                    .await;
-                    // Remembered for the account, so the repository's later
-                    // wiring finds the identity it was committed with.
-                    if let Ok(identity) = &identity {
-                        let (login, identity) = (login.clone(), identity.clone());
-                        cx.update(|cx| {
-                            set_commit_identity(&login, &identity.name, &identity.email, cx)
-                        });
-                    }
-                    identity
-                }
-            };
+            let identity = account_identity(&gh_state, &login, &root, saved, cx).await;
             let result = match identity {
                 Ok(identity) => {
                     wait_until_pushable(&gh_state, &owner, &name, cx).await;
                     on_tokio(async move {
-                        attach_workspace(
-                            &*fs,
-                            &root,
-                            &name,
-                            &description,
-                            &url,
-                            &attach,
-                            &identity,
-                            token.as_deref(),
-                        )
-                        .await
+                        if attach.existing {
+                            connect_workspace(&root, &url, &identity, token.as_deref()).await
+                        } else {
+                            attach_workspace(
+                                &*fs,
+                                &root,
+                                &name,
+                                &description,
+                                &url,
+                                &attach,
+                                &identity,
+                                token.as_deref(),
+                            )
+                            .await
+                        }
                     })
                     .await
                 }
@@ -404,6 +471,103 @@ async fn attach_workspace(
             .await
             .map_err(local_failure)?;
     }
+    git_as_account(&["push", "-u", "origin", "HEAD"], root, token)
+        .await
+        .map_err(local_failure)
+}
+
+/// The account's saved commit identity, if it has one.
+fn saved_identity(login: &str, cx: &App) -> Option<Identity> {
+    let account = HelmPanelSettings::get_global(cx).account(login)?;
+    let email = account.git_email.clone()?;
+    let name = account
+        .git_name
+        .clone()
+        .unwrap_or_else(|| account.display_name().to_string());
+    Some(Identity { name, email })
+}
+
+/// The identity commits are authored as for `login`: the saved one, or else
+/// worked out from the account (see [`identity_for`]) and remembered, so the
+/// repository's later wiring finds the identity it was committed with.
+async fn account_identity(
+    gh_state: &Arc<GhState>,
+    login: &str,
+    root: &Path,
+    saved: Option<Identity>,
+    cx: &AsyncApp,
+) -> Result<Identity, GhError> {
+    if let Some(identity) = saved {
+        return Ok(identity);
+    }
+    let (state, root) = (gh_state.clone(), root.to_path_buf());
+    // Off the main thread: two API calls and two `git`s.
+    let identity = on_tokio(async move {
+        let user = gh_get_current_user(&state).await?;
+        // A token without the `user` scope cannot read them.
+        let emails = gh_get_verified_emails(&state).await.unwrap_or_default();
+        Ok::<_, GhError>(identity_for(
+            &user.login,
+            user.id,
+            user.name.as_deref(),
+            &emails,
+            git_config(&root, "--global", "user.name"),
+            git_config(&root, "--global", "user.email"),
+        ))
+    })
+    .await?;
+    let (login, remembered) = (login.to_string(), identity.clone());
+    cx.update(|cx| set_commit_identity(&login, &remembered.name, &remembered.email, cx));
+    Ok(identity)
+}
+
+/// Connects the repository at `root` to `url` and pushes the current
+/// branch, as the account whose `token` it is. The repository must already
+/// have a commit; nothing is initialized, staged, committed or forced.
+async fn connect_workspace(
+    root: &Path,
+    url: &str,
+    identity: &Identity,
+    token: Option<&str>,
+) -> Result<(), AttachFailure> {
+    if git(&["rev-parse", "--verify", "HEAD"], root).await.is_err() {
+        return Err(AttachFailure {
+            local_repo: false,
+            message: "This repository has no commits yet. Commit your changes first, then \
+                      publish."
+                .to_string(),
+        });
+    }
+
+    // A repository that already names a commit email keeps it: it was set by
+    // hand or by another tool, and is not overwritten here.
+    if git_config(root, "--local", "user.email").is_none() {
+        for (key, value) in [
+            ("user.name", identity.name.as_str()),
+            ("user.email", identity.email.as_str()),
+        ] {
+            git(&["config", "--local", key, value], root)
+                .await
+                .map_err(local_failure)?;
+        }
+    }
+
+    match git_config(root, "--local", "remote.origin.url") {
+        Some(existing) if existing.trim() == url => {}
+        Some(existing) => {
+            return Err(AttachFailure {
+                local_repo: false,
+                message: format!(
+                    "This repository already has an origin ({}). Remove or change it first.",
+                    existing.trim()
+                ),
+            });
+        }
+        None => git(&["remote", "add", "origin", url], root)
+            .await
+            .map_err(local_failure)?,
+    }
+
     git_as_account(&["push", "-u", "origin", "HEAD"], root, token)
         .await
         .map_err(local_failure)

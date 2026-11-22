@@ -29,6 +29,7 @@ mod profile;
 mod pulls;
 mod releases_packages;
 mod repo_access;
+mod repo_picker;
 mod repos;
 mod repository_modal;
 mod state;
@@ -670,7 +671,14 @@ impl HelmPanel {
             }
             return;
         }
-        self.open_workspace_modal(HelmModalKind::CreateRepo { attach_local: true }, window, cx);
+        self.open_workspace_modal(
+            HelmModalKind::CreateRepo {
+                attach_local: true,
+                existing: None,
+            },
+            window,
+            cx,
+        );
     }
 
     /// Shows `message` as a toast on the workspace this panel is attached
