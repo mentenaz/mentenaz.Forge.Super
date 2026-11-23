@@ -239,6 +239,9 @@ Restricted Mode for that reason, and Forge's panels must too. Two parts:
   (`run_cargo_output`, `run_dotnet_captured`, `run_npm_cli`, `run_captured`, and
   Helm's `run_git`, which also turns `core.fsmonitor` off), so a
   new caller is covered; a new backend or a new `Command::new` needs its own check.
+  An *offer* to run tooling is covered too: `npm_bootstrap` offers `npm install`
+  only once the project is trusted, and runs it in the Script Runner (which asks
+  the gate), not with a process of its own.
 - `forge_trust::watch_project` (called for every project in `zed.rs`) keeps that
   gate current, the dock shows "Trust this project to scan it" in place of a panel
   listed in `PANELS_NEEDING_TRUST` (`workspace/src/dock.rs`), and a panel that

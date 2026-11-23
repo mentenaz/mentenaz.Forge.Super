@@ -11,12 +11,13 @@ path = "src/npm_bootstrap.rs"
 doctest = false
 
 [dependencies]
-anyhow.workspace = true
 db.workspace = true
+forge_trust.workspace = true
 gpui.workspace = true
-gpui_tokio.workspace = true
+gpui-component.workspace = true
 project.workspace = true
-tokio = { workspace = true, features = ["process"] }
+script_runner_panel.workspace = true
+ui.workspace = true
 workspace.workspace = true
 
 [dev-dependencies]

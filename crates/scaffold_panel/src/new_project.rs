@@ -159,6 +159,9 @@ struct Created {
     bytes: u64,
     /// What the host would run afterwards, in words.
     post: Vec<String>,
+    /// The plan asked for the dependencies to be installed ("Run install
+    /// afterwards" was on).
+    install_requested: bool,
 }
 
 enum Creation {
@@ -217,12 +220,17 @@ fn run_create(
         .iter()
         .map(|step| describe_post(step, &planned.target))
         .collect();
+    let install_requested = planned
+        .post
+        .iter()
+        .any(|step| step.action == PostAction::Install);
     let outcome = apply(&planned, on_progress).map_err(|error| error.to_string())?;
     Ok(Created {
         target: outcome.root,
         files: outcome.files_written,
         bytes: outcome.bytes_written,
         post,
+        install_requested,
     })
 }
 
@@ -951,6 +959,12 @@ impl NewProjectView {
                 this.creation = match result {
                     Ok(created) => {
                         Self::remember_location(&chosen, cx);
+                        // The install offer a new window makes for a project with a
+                        // package.json is not wanted when "Run install afterwards"
+                        // was left off.
+                        if !created.install_requested {
+                            npm_bootstrap::decline_install_offer(&created.target, cx);
+                        }
                         Creation::Done(created)
                     }
                     Err(error) => Creation::Failed(error),
@@ -1172,8 +1186,9 @@ impl NewProjectView {
                                     div().text_xs().text_color(muted).child(format!("• {step}"))
                                 }))
                                 .child(div().text_xs().text_color(muted).child(
-                                    "Running these comes in the next phase. For now, open the \
-                                     project and run them yourself.",
+                                    "Open the project: once you trust it, Forge offers to \
+                                     install the dependencies and shows the output in the \
+                                     Script Runner. Anything else here you run yourself.",
                                 )),
                         )
                     })

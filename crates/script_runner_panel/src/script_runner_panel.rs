@@ -258,6 +258,10 @@ pub struct ScriptRunnerPanel {
     cwd: String,
     output: Vec<String>,
     running: bool,
+    /// How the last finished run ended: its exit code, and whether Stop killed
+    /// it. `None` before any run has finished, and while one is running. Lets a
+    /// caller that started a run (an install, say) report how it went.
+    last_exit: Option<(i32, bool)>,
     kill_flag: Arc<AtomicBool>,
     /// Environment variables for the run being started, from
     /// [`Self::run_external_with_env`]. Empty outside that call.
@@ -344,6 +348,7 @@ impl ScriptRunnerPanel {
                                         was_killed,
                                     } => {
                                         panel.running = false;
+                                        panel.last_exit = Some((exit_code, was_killed));
                                         panel.kill_flag.store(false, Ordering::SeqCst);
                                         let marker = if was_killed {
                                             "[killed]".to_string()
@@ -373,6 +378,7 @@ impl ScriptRunnerPanel {
                 cwd,
                 output: Vec::new(),
                 running: false,
+                last_exit: None,
                 kill_flag: Arc::new(AtomicBool::new(false)),
                 run_env: Vec::new(),
                 pending_command: None,
@@ -418,6 +424,12 @@ impl ScriptRunnerPanel {
         self.running
     }
 
+    /// How the last finished run ended, as (exit code, killed by Stop). `None`
+    /// while a run is going and before the first one has finished.
+    pub fn last_exit(&self) -> Option<(i32, bool)> {
+        self.last_exit
+    }
+
     fn run(&mut self, command: &str, cx: &mut Context<Self>) {
         if self.running {
             return;
@@ -450,6 +462,7 @@ impl ScriptRunnerPanel {
         self.detected_links.clear();
         self.link_copied = None;
         self.running = true;
+        self.last_exit = None;
         self.kill_flag.store(false, Ordering::SeqCst);
         cx.notify();
 

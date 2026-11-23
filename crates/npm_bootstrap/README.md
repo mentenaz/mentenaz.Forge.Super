@@ -20,9 +20,14 @@ no `node_modules`, a toast appears:
 
 > package.json found — install dependencies?  **Run npm install**
 
-Clicking the button runs `npm install` in that folder in the background and
-shows a second toast with the result ("Installed dependencies", or the error
-output).
+Clicking the button runs `npm install` in that folder in the Script Runner, which
+is revealed so the install can be watched (it can take minutes). The Script Runner
+asks the trust gate, so nothing runs in a folder that is not trusted.
+
+`npm install` runs the project's own `preinstall` and `postinstall` scripts, so the
+offer is **not made while the project is in Restricted Mode**. It is made when the
+project becomes trusted. A project made by the Scaffold panel with "Run install
+afterwards" turned off is marked as already offered, and gets no offer.
 
 The offer is made **once per project directory**. The marker is written as
 soon as the toast is shown, so dismissing it does not bring it back next

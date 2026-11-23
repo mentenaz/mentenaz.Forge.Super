@@ -13135,13 +13135,14 @@ dependencies = [
 name = "npm_bootstrap"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "db",
+ "forge_trust",
  "gpui",
- "gpui_tokio",
+ "gpui-component",
  "project",
+ "script_runner_panel",
  "tempfile",
- "tokio",
+ "ui",
  "workspace",
 ]
 
@@ -18191,6 +18192,7 @@ dependencies = [
  "gpui-component",
  "http_client",
  "node_backend",
+ "npm_bootstrap",
  "paths",
  "serde_json",
  "settings",
