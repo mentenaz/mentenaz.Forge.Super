@@ -35,6 +35,7 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     panel_header::PanelHeader,
     spinner::Spinner,
+    tab::{Tab, TabBar, TabVariant},
     tag::Tag,
     v_flex,
 };
@@ -64,6 +65,48 @@ const INDEX_URL: &str = "https://downloads.mentenaz-server.com/forge-scaffold/in
 /// The search text is deliberately not saved: a panel that reopens already
 /// filtered by last week's search looks broken.
 const TAG_FILTER_KEY: &str = "scaffold_panel.tag_filter";
+
+/// Where the chosen list tab is remembered (as `all`, `installed` or `local`).
+const TAB_KEY: &str = "scaffold_panel.tab";
+
+/// The tabs over the list. Every template is in `All`; `Installed` is what has
+/// been downloaded; `Local` is a folder the user made themselves (it stays empty
+/// until there are any, and says so).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListTab {
+    All,
+    Installed,
+    Local,
+}
+
+impl ListTab {
+    const ALL: [(ListTab, &'static str, &'static str); 3] = [
+        (ListTab::All, "All templates", "all"),
+        (ListTab::Installed, "Installed", "installed"),
+        (ListTab::Local, "Local templates", "local"),
+    ];
+
+    fn from_saved(saved: &str) -> Self {
+        Self::ALL
+            .iter()
+            .find(|(_, _, key)| *key == saved)
+            .map_or(ListTab::All, |(tab, _, _)| *tab)
+    }
+
+    fn saved(self) -> &'static str {
+        Self::ALL
+            .iter()
+            .find(|(tab, _, _)| *tab == self)
+            .map_or("all", |(_, _, key)| key)
+    }
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|(tab, _, _)| *tab == self)
+            .unwrap_or(0)
+    }
+}
 
 /// The most a single download may be. The index and the archives are small; the
 /// engine also checks the size and SHA-256 it was promised, this only stops a
@@ -161,6 +204,8 @@ pub struct ScaffoldPanel {
     search: Entity<InputState>,
     /// Only generators carrying this tag are shown. Remembered between sessions.
     tag_filter: Option<String>,
+    /// Which tab of the list is showing. Remembered between sessions.
+    tab: ListTab,
     _search_subscription: Subscription,
 }
 
@@ -232,10 +277,12 @@ impl ScaffoldPanel {
                 workspace,
                 search,
                 tag_filter: None,
+                tab: ListTab::All,
                 _search_subscription: search_subscription,
             };
             panel.reload(cx);
             Self::restore_tag_filter(cx);
+            Self::restore_tab(cx);
             panel
         })
     }
@@ -276,9 +323,61 @@ impl ScaffoldPanel {
         .detach();
     }
 
-    /// Whether `info` passes the tag filter and the search text (already lower
-    /// case). The search looks at the title, the id, the description and the tags.
+    /// Switches to the tab at `index` and remembers it.
+    fn set_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some((tab, _, _)) = ListTab::ALL.get(index) else {
+            return;
+        };
+        self.tab = *tab;
+        cx.notify();
+        let kvp = KeyValueStore::global(cx);
+        let saved = tab.saved().to_string();
+        cx.background_spawn(async move {
+            kvp.write_kvp(TAB_KEY.to_string(), saved).await.ok();
+        })
+        .detach();
+    }
+
+    /// Restores the tab of the last session, off the main thread; until it lands
+    /// the list shows every template.
+    fn restore_tab(cx: &mut Context<Self>) {
+        let kvp = KeyValueStore::global(cx);
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_spawn(async move { kvp.read_kvp(TAB_KEY) })
+                .await
+                .ok()
+                .flatten();
+            let Some(saved) = saved else {
+                return;
+            };
+            this.update(cx, |panel, cx| {
+                panel.tab = ListTab::from_saved(&saved);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Whether `info` belongs on the current tab. A downloaded template is the
+    /// one the row tags "Installed"; a folder of the user's own is "Custom" and
+    /// belongs to the Local tab alone.
+    fn in_tab(&self, info: &GeneratorInfo) -> bool {
+        match self.tab {
+            ListTab::All => true,
+            ListTab::Installed => info.installed && !info.local,
+            ListTab::Local => info.local,
+        }
+    }
+
+    /// Whether `info` passes the tab, the tag filter and the search text (already
+    /// lower case). The search looks at the title, the id, the description and
+    /// the tags.
     fn matches_filter(&self, info: &GeneratorInfo, query: &str) -> bool {
+        if !self.in_tab(info) {
+            return false;
+        }
         if let Some(tag) = &self.tag_filter
             && !info.tags.iter().any(|candidate| candidate == tag)
         {
@@ -299,13 +398,33 @@ impl ScaffoldPanel {
         let theme = cx.theme();
         let (border, muted) = (theme.border, theme.muted_foreground);
         let tags: BTreeSet<&String> = list.generators.iter().flat_map(|g| g.tags.iter()).collect();
-        let filtering = self.tag_filter.is_some() || !self.search.read(cx).value().is_empty();
+        let filtering = self.tag_filter.is_some()
+            || !self.search.read(cx).value().is_empty()
+            || self.tab != ListTab::All;
+        // What is on the current tab: the count a filter or a search narrows down.
+        let on_tab = list
+            .generators
+            .iter()
+            .filter(|info| self.in_tab(info))
+            .count();
         v_flex()
             .gap_2()
             .px_3()
             .py_2()
             .border_b_1()
             .border_color(border)
+            // The tabs sit above the search box.
+            .child(
+                TabBar::new("scaffold-list-tabs")
+                    .with_variant(TabVariant::Underline)
+                    .children(
+                        ListTab::ALL
+                            .iter()
+                            .map(|(_, label, _)| Tab::new().label(*label)),
+                    )
+                    .selected_index(self.tab.index())
+                    .on_click(cx.listener(|this, index: &usize, _, cx| this.set_tab(*index, cx))),
+            )
             .child(Input::new(&self.search))
             .when(!tags.is_empty(), |column| {
                 column.child(h_flex().flex_wrap().gap_1().children(
@@ -324,10 +443,12 @@ impl ScaffoldPanel {
                 ))
             })
             .when(filtering, |column| {
-                column.child(div().text_xs().text_color(muted).child(format!(
-                    "Showing {shown} of {}",
-                    list.generators.len()
-                )))
+                column.child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("Showing {shown} of {on_tab}")),
+                )
             })
             .into_any_element()
     }
@@ -590,23 +711,52 @@ impl Render for ScaffoldPanel {
                     .filter(|info| self.matches_filter(info, &query))
                     .collect();
                 if rows.is_empty() {
+                    let narrowed = self.tag_filter.is_some() || !query.is_empty();
+                    // An empty tab with nothing narrowing it says what belongs
+                    // there; otherwise it is the filters that found nothing.
+                    let message = match (self.tab, narrowed) {
+                        (ListTab::Installed, false) => {
+                            "Nothing downloaded yet. Pick a template under All templates and \
+                             download it, and it is listed here."
+                        }
+                        (ListTab::Local, false) => {
+                            "No local templates yet. A template folder you make yourself will \
+                             be listed here."
+                        }
+                        _ => "No templates match.",
+                    };
                     v_flex()
                         .gap_2()
                         .p_3()
-                        .child(div().text_sm().text_color(muted).child("No templates match."))
+                        .child(div().text_sm().text_color(muted).child(message))
                         .child(
-                            h_flex().child(
-                                Button::new("scaffold-clear-filters")
-                                    .outline()
-                                    .small()
-                                    .label("Clear filters")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.search.update(cx, |search, cx| {
-                                            search.set_value("", window, cx);
-                                        });
-                                        this.set_tag_filter(None, cx);
-                                    })),
-                            ),
+                            h_flex()
+                                .gap_2()
+                                .when(narrowed, |row| {
+                                    row.child(
+                                        Button::new("scaffold-clear-filters")
+                                            .outline()
+                                            .small()
+                                            .label("Clear filters")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.search.update(cx, |search, cx| {
+                                                    search.set_value("", window, cx);
+                                                });
+                                                this.set_tag_filter(None, cx);
+                                            })),
+                                    )
+                                })
+                                .when(self.tab != ListTab::All, |row| {
+                                    row.child(
+                                        Button::new("scaffold-show-all")
+                                            .outline()
+                                            .small()
+                                            .label("Show all templates")
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.set_tab(0, cx)),
+                                            ),
+                                    )
+                                }),
                         )
                         .into_any_element()
                 } else {
