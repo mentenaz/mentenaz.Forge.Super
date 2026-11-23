@@ -12,14 +12,16 @@
 //! runs in `cx.background_spawn`. A result that arrives after the user has
 //! picked another version is dropped (`generation`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use db::kvp::KeyValueStore;
 use forge_scaffold::{
-    Answers, DirSource, Manifest, NodeCheck, PlanOptions, PostAction, PostStepDescriptor, Prompt,
-    PromptKind, ScaffoldError, TemplateStore, VersionInfo, WriteProgress, apply, plan,
+    Answers, DirSource, Manifest, NameRule, NodeCheck, PlanOptions, PostAction,
+    PostStepDescriptor, Prompt, PromptKind, ScaffoldError, TemplateStore, VersionInfo,
+    WriteProgress, apply, plan, validate_package_name, validate_solution_name,
+    validate_webpart_names,
 };
 use futures::StreamExt as _;
 use gpui::{
@@ -34,7 +36,7 @@ use gpui_component::{
     button::{Button, ButtonVariants as _},
     form::{field, v_form},
     h_flex,
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
     list::ListItem,
     progress::Progress,
     select::{Select, SelectEvent, SelectState},
@@ -70,8 +72,26 @@ enum Control {
     Text(Entity<InputState>),
     Bool(bool),
     Choice(Entity<SelectState<Vec<String>>>),
-    /// A comma separated list.
-    List(Entity<InputState>),
+    /// A list: one input per item, with a [+] to add another. The engine takes
+    /// the items as an array, so no text has to be split or joined.
+    List(Vec<Entity<InputState>>),
+}
+
+/// The hint in row `row` (counting from 0) of a list field: that row's default
+/// when the prompt has one, else the prompt's label made singular, numbered:
+/// "Web part names" gives "Web part 1", "Web part 2".
+fn row_placeholder(prompt: &Prompt, row: usize) -> String {
+    if let Some(Value::Array(items)) = &prompt.default
+        && let Some(Value::String(item)) = items.get(row)
+    {
+        return item.clone();
+    }
+    let label = prompt.label.clone().unwrap_or_else(|| prompt.key.clone());
+    let singular = label
+        .trim_end_matches(" names")
+        .trim_end_matches(" name");
+    let singular = singular.strip_suffix('s').unwrap_or(singular);
+    format!("{singular} {}", row + 1)
 }
 
 struct Field {
@@ -259,6 +279,9 @@ pub struct NewProjectView {
     /// Bumped whenever another version is chosen, so a slow answer for the
     /// old one is ignored.
     generation: u64,
+    /// One per input of the form, so typing re-draws it and the validation under
+    /// each field follows what is typed. Rebuilt with the form.
+    field_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -428,6 +451,7 @@ impl NewProjectView {
             workspace,
             review_tree: None,
             generation: 0,
+            field_subscriptions: Vec::new(),
             _subscriptions: vec![subscription],
         };
         view.load_versions(window, cx);
@@ -591,6 +615,20 @@ impl NewProjectView {
             }
         };
         let fields = Self::build_fields(&manifest, window, cx);
+        // Typing in any input re-draws the form, which is what makes the
+        // validation live.
+        let inputs: Vec<Entity<InputState>> = fields
+            .iter()
+            .flat_map(|field| match &field.control {
+                Control::Text(state) => vec![state.clone()],
+                Control::List(rows) => rows.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        self.field_subscriptions.clear();
+        for input in &inputs {
+            self.watch_input(input, cx);
+        }
         self.start_node_check(manifest.clone(), cx);
         self.loaded = Some(Loaded {
             manifest,
@@ -632,6 +670,14 @@ impl NewProjectView {
                             SelectState::new(options, selected.map(IndexPath::new), window, cx)
                         }))
                     }
+                    // One empty row to start with; an empty list leaves the engine's
+                    // default in place.
+                    PromptKind::List => {
+                        let placeholder = row_placeholder(prompt, 0);
+                        Control::List(vec![cx.new(|cx| {
+                            InputState::new(window, cx).placeholder(placeholder)
+                        })])
+                    }
                     _ => {
                         let placeholder = prompt
                             .default
@@ -643,11 +689,7 @@ impl NewProjectView {
                             let state = InputState::new(window, cx).placeholder(placeholder);
                             if sensitive { state.masked(true) } else { state }
                         });
-                        if matches!(prompt.kind, PromptKind::List) {
-                            Control::List(state)
-                        } else {
-                            Control::Text(state)
-                        }
+                        Control::Text(state)
                     }
                 };
                 Field {
@@ -715,12 +757,11 @@ impl NewProjectView {
                         answers.insert(key, json!(choice));
                     }
                 }
-                Control::List(state) => {
-                    let items: Vec<String> = state
-                        .read(cx)
-                        .value()
-                        .split(',')
-                        .map(|item| item.trim().to_string())
+                Control::List(rows) => {
+                    // Each row is one item, exactly as the validation saw it.
+                    let items: Vec<String> = rows
+                        .iter()
+                        .map(|row| row.read(cx).value().trim().to_string())
                         .filter(|item| !item.is_empty())
                         .collect();
                     if !items.is_empty() {
@@ -769,6 +810,141 @@ impl NewProjectView {
             .ok();
         })
         .detach();
+    }
+
+    /// Re-draws the form whenever `input` changes, so the messages under the
+    /// fields follow what is typed.
+    fn watch_input(&mut self, input: &Entity<InputState>, cx: &mut Context<Self>) {
+        let subscription = cx.subscribe(input, |_, _, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                cx.notify();
+            }
+        });
+        self.field_subscriptions.push(subscription);
+    }
+
+    /// Adds an empty row to the list field at `index`, directly below row `after`
+    /// (that row's [+] button).
+    fn add_list_row(
+        &mut self,
+        index: usize,
+        after: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = {
+            let Some(Loaded { fields, .. }) = &self.loaded else {
+                return;
+            };
+            let Some(Field {
+                prompt,
+                control: Control::List(rows),
+            }) = fields.get(index)
+            else {
+                return;
+            };
+            row_placeholder(prompt, rows.len())
+        };
+        let row = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        if let Some(Loaded { fields, .. }) = &mut self.loaded
+            && let Some(Field {
+                control: Control::List(rows),
+                ..
+            }) = fields.get_mut(index)
+        {
+            rows.insert((after + 1).min(rows.len()), row.clone());
+        }
+        self.watch_input(&row, cx);
+        cx.notify();
+    }
+
+    /// Whether any row of a list is still empty: another row is not added then.
+    fn has_empty_row(rows: &[Entity<InputState>], cx: &App) -> bool {
+        rows.iter()
+            .any(|row| row.read(cx).value().trim().is_empty())
+    }
+
+    /// What is wrong with `field` as it stands, by the engine's own rules and
+    /// nothing else: `(row, message)`, with `row` set for a list item. Empty
+    /// fields are left alone (an empty text uses the default; "at least one" is
+    /// the engine's to say at the end). Duplicates in a list are caught
+    /// ignoring case, as the engine does, since the names become files.
+    fn field_issues(field: &Field, cx: &App) -> Vec<(Option<usize>, String)> {
+        match (&field.control, &field.prompt.rule) {
+            (Control::Text(state), Some(rule)) => {
+                let text = state.read(cx).value().trim().to_string();
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                let issues = match rule {
+                    NameRule::SolutionName => validate_solution_name(&text),
+                    NameRule::PackageName => validate_package_name(&text),
+                    _ => Vec::new(),
+                };
+                issues
+                    .into_iter()
+                    .map(|issue| (None, issue.message))
+                    .collect()
+            }
+            (Control::List(rows), rule) => {
+                // The rows that have something in them, with their row number.
+                let filled: Vec<(usize, String)> = rows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(row, state)| {
+                        let text = state.read(cx).value().trim().to_string();
+                        (!text.is_empty()).then_some((row, text))
+                    })
+                    .collect();
+                if let Some(NameRule::WebpartNames) = rule {
+                    let names: Vec<String> = filled.iter().map(|(_, name)| name.clone()).collect();
+                    validate_webpart_names(&names)
+                        .into_iter()
+                        .filter_map(|issue| {
+                            // `webparts[2]`: the third filled row. An issue about the
+                            // list as a whole has no number and is left to the end.
+                            let position = issue
+                                .field
+                                .split_once('[')?
+                                .1
+                                .strip_suffix(']')?
+                                .parse::<usize>()
+                                .ok()?;
+                            Some((Some(filled.get(position)?.0), issue.message))
+                        })
+                        .collect()
+                } else {
+                    let mut seen = HashSet::new();
+                    filled
+                        .into_iter()
+                        .filter_map(|(row, text)| {
+                            (!seen.insert(text.to_lowercase())).then(|| {
+                                (Some(row), format!("'{text}' is already in the list"))
+                            })
+                        })
+                        .collect()
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Takes row `row` out of the list field at `index` (a row's [-] button).
+    /// The last remaining row stays: a list always has one to type in.
+    fn remove_list_row(&mut self, index: usize, row: usize, cx: &mut Context<Self>) {
+        let Some(Loaded { fields, .. }) = &mut self.loaded else {
+            return;
+        };
+        if let Some(Field {
+            control: Control::List(rows),
+            ..
+        }) = fields.get_mut(index)
+            && rows.len() > 1
+            && row < rows.len()
+        {
+            rows.remove(row);
+            cx.notify();
+        }
     }
 
     fn set_bool(&mut self, index: usize, value: bool) {
@@ -1384,6 +1560,9 @@ impl NewProjectView {
         };
 
         let mut form = v_form();
+        // Set when any field that is showing has something wrong with it right
+        // now: "Next" waits until it is put right.
+        let mut blocked = false;
         for (index, field_state) in loaded.fields.iter().enumerate() {
             let prompt = &field_state.prompt;
             if let Some(when) = &prompt.when
@@ -1391,16 +1570,21 @@ impl NewProjectView {
             {
                 continue;
             }
-            let mut label = prompt.label.clone().unwrap_or_else(|| prompt.key.clone());
-            if matches!(field_state.control, Control::List(_)) {
-                label.push_str(" (comma separated)");
-            }
-            let message = issues
-                .iter()
-                .find(|(key, _)| key == &prompt.key)
-                .map(|(_, message)| message.clone());
+            let label = prompt.label.clone().unwrap_or_else(|| prompt.key.clone());
+            // What is wrong as it is typed, then (if nothing is) what the engine
+            // said on the last "Next".
+            let live = Self::field_issues(field_state, cx);
+            blocked |= !live.is_empty();
+            let message = match (&field_state.control, live.iter().find(|(row, _)| row.is_none())) {
+                (_, Some((_, message))) => Some(message.clone()),
+                (Control::List(_), None) if !live.is_empty() => None,
+                _ => issues
+                    .iter()
+                    .find(|(key, _)| key == &prompt.key)
+                    .map(|(_, message)| message.clone()),
+            };
             let control = match &field_state.control {
-                Control::Text(state) | Control::List(state) => {
+                Control::Text(state) => {
                     let input = Input::new(state);
                     if prompt.sensitive {
                         input.mask_toggle().into_any_element()
@@ -1408,6 +1592,52 @@ impl NewProjectView {
                         input.into_any_element()
                     }
                 }
+                // [item 1][+]  then  [item 2][-]  and so on: the first row's [+]
+                // adds another row, every later row has a [-] to take it away.
+                Control::List(rows) => v_flex()
+                    .gap_1()
+                    .children(rows.iter().enumerate().map(|(row, state)| {
+                        let row_message = live
+                            .iter()
+                            .find(|(at, _)| *at == Some(row))
+                            .map(|(_, message)| message.clone());
+                        // [-] takes this row away (the last one stays), [+] adds an
+                        // empty row directly below it, so a list can grow from any row.
+                        let remove = Button::new(("scaffold-list-remove", index * 1000 + row))
+                            .ghost()
+                            .small()
+                            .icon(IconName::Minus)
+                            .tooltip("Remove")
+                            .disabled(rows.len() < 2)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_list_row(index, row, cx)
+                            }));
+                        let add = Button::new(("scaffold-list-add", index * 1000 + row))
+                            .ghost()
+                            .small()
+                            .icon(IconName::Plus)
+                            .tooltip("Add another below")
+                            // Not while a row is still empty: that would only pile
+                            // up blank rows.
+                            .disabled(Self::has_empty_row(rows, cx))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.add_list_row(index, row, window, cx)
+                            }));
+                        v_flex()
+                            .gap_0p5()
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(div().flex_1().child(Input::new(state)))
+                                    .child(remove)
+                                    .child(add),
+                            )
+                            .children(row_message.map(|message| {
+                                div().text_xs().text_color(danger).child(message)
+                            }))
+                    }))
+                    .into_any_element(),
                 Control::Choice(state) => Select::new(state).into_any_element(),
                 Control::Bool(value) => Switch::new(("scaffold-bool", index))
                     .label(label.clone())
@@ -1469,7 +1699,8 @@ impl NewProjectView {
                         } else {
                             "Next: review"
                         })
-                        .disabled(running)
+                        // Not while a field is wrong: the engine would only refuse it.
+                        .disabled(running || blocked)
                         .on_click(cx.listener(|this, _, _, cx| this.check_answers(cx))),
                 ),
             )
