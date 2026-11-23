@@ -11,6 +11,7 @@
 mod new_project;
 mod scaffold_panel_settings;
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,13 +23,16 @@ use forge_scaffold::{
 use futures::AsyncReadExt as _;
 use gpui::{
     Action, AnyElement, App, AppContext as _, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
+    Subscription, prelude::FluentBuilder as _,
     Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
     StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, actions, div, px,
 };
+use db::kvp::KeyValueStore;
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
+    input::{Input, InputEvent, InputState},
     panel_header::PanelHeader,
     spinner::Spinner,
     tag::Tag,
@@ -54,6 +58,12 @@ actions!(
 
 /// The live templates index, published by the templates repo's release builder.
 const INDEX_URL: &str = "https://downloads.mentenaz-server.com/forge-scaffold/index.json";
+
+/// Where the chosen tag filter is remembered, in the same database the other
+/// panels keep their small bits of state in. An empty value means no filter.
+/// The search text is deliberately not saved: a panel that reopens already
+/// filtered by last week's search looks broken.
+const TAG_FILTER_KEY: &str = "scaffold_panel.tag_filter";
 
 /// The most a single download may be. The index and the archives are small; the
 /// engine also checks the size and SHA-256 it was promised, this only stops a
@@ -147,6 +157,11 @@ pub struct ScaffoldPanel {
     notice: Option<String>,
     http: Arc<dyn HttpClient>,
     workspace: WeakEntity<Workspace>,
+    /// The search box over the list; typing re-renders the list.
+    search: Entity<InputState>,
+    /// Only generators carrying this tag are shown. Remembered between sessions.
+    tag_filter: Option<String>,
+    _search_subscription: Subscription,
 }
 
 /// Where the templates live: next to the Node and Python version stores in the
@@ -195,12 +210,19 @@ impl ScaffoldPanel {
 
     pub fn new(
         workspace: &mut Workspace,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         let http = cx.http_client();
         let workspace = workspace.weak_handle();
         cx.new(|cx| {
+            let search =
+                cx.new(|cx| InputState::new(window, cx).placeholder("Search templates…"));
+            let search_subscription = cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    cx.notify();
+                }
+            });
             let mut panel = Self {
                 focus_handle: cx.focus_handle(),
                 listing: Listing::Loading,
@@ -208,10 +230,106 @@ impl ScaffoldPanel {
                 notice: None,
                 http,
                 workspace,
+                search,
+                tag_filter: None,
+                _search_subscription: search_subscription,
             };
             panel.reload(cx);
+            Self::restore_tag_filter(cx);
             panel
         })
+    }
+
+    /// Sets (or clears) the tag filter and remembers it.
+    fn set_tag_filter(&mut self, tag: Option<String>, cx: &mut Context<Self>) {
+        self.tag_filter = tag.clone();
+        cx.notify();
+        let kvp = KeyValueStore::global(cx);
+        cx.background_spawn(async move {
+            kvp.write_kvp(TAG_FILTER_KEY.to_string(), tag.unwrap_or_default())
+                .await
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Restores the tag filter of the last session. Reads the IDE's database, so
+    /// off the main thread; until it lands the list is unfiltered.
+    fn restore_tag_filter(cx: &mut Context<Self>) {
+        let kvp = KeyValueStore::global(cx);
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_spawn(async move { kvp.read_kvp(TAG_FILTER_KEY) })
+                .await
+                .ok()
+                .flatten()
+                .filter(|tag| !tag.is_empty());
+            let Some(tag) = saved else {
+                return;
+            };
+            this.update(cx, |panel, cx| {
+                panel.tag_filter = Some(tag);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Whether `info` passes the tag filter and the search text (already lower
+    /// case). The search looks at the title, the id, the description and the tags.
+    fn matches_filter(&self, info: &GeneratorInfo, query: &str) -> bool {
+        if let Some(tag) = &self.tag_filter
+            && !info.tags.iter().any(|candidate| candidate == tag)
+        {
+            return false;
+        }
+        if query.is_empty() {
+            return true;
+        }
+        let contains = |text: &str| text.to_lowercase().contains(query);
+        contains(&info.title)
+            || contains(&info.id)
+            || info.description.as_deref().is_some_and(|d| contains(d))
+            || info.tags.iter().any(|tag| contains(tag))
+    }
+
+    /// The search box and one chip per tag the generators carry.
+    fn render_filters(&self, list: &GeneratorList, shown: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (border, muted) = (theme.border, theme.muted_foreground);
+        let tags: BTreeSet<&String> = list.generators.iter().flat_map(|g| g.tags.iter()).collect();
+        let filtering = self.tag_filter.is_some() || !self.search.read(cx).value().is_empty();
+        v_flex()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(border)
+            .child(Input::new(&self.search))
+            .when(!tags.is_empty(), |column| {
+                column.child(h_flex().flex_wrap().gap_1().children(
+                    tags.into_iter().enumerate().map(|(index, tag)| {
+                        let selected = self.tag_filter.as_deref() == Some(tag.as_str());
+                        let chip = Button::new(("scaffold-tag", index)).small().label(tag.clone());
+                        let chip = if selected { chip.primary() } else { chip.outline() };
+                        let tag = tag.clone();
+                        chip.on_click(cx.listener(move |this, _, _, cx| {
+                            // Clicking the chosen tag again clears it.
+                            let next = (this.tag_filter.as_deref() != Some(tag.as_str()))
+                                .then(|| tag.clone());
+                            this.set_tag_filter(next, cx);
+                        }))
+                    }),
+                ))
+            })
+            .when(filtering, |column| {
+                column.child(div().text_xs().text_color(muted).child(format!(
+                    "Showing {shown} of {}",
+                    list.generators.len()
+                )))
+            })
+            .into_any_element()
     }
 
     /// Reads the templates folder again, off the main thread.
@@ -429,6 +547,7 @@ impl Render for ScaffoldPanel {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let (sidebar, border, danger) = (theme.sidebar, theme.border, theme.danger);
+        let query = self.search.read(cx).value().trim().to_lowercase();
 
         let header = PanelHeader::new("Scaffold").actions([Button::new("scaffold-check")
             .ghost()
@@ -462,22 +581,63 @@ impl Render for ScaffoldPanel {
                 .text_color(muted)
                 .child("No templates yet. Use Check for updates to download them.")
                 .into_any_element(),
-            Listing::Ready(list) => v_flex()
-                .children(
-                    list.generators
-                        .iter()
-                        .enumerate()
-                        .map(|(index, info)| self.render_row(index, info, cx)),
-                )
-                .children(list.problems.iter().map(|problem| {
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_xs()
-                        .text_color(danger)
-                        .child(problem.clone())
-                }))
-                .into_any_element(),
+            Listing::Ready(list) => {
+                let rows: Vec<&GeneratorInfo> = list
+                    .generators
+                    .iter()
+                    .filter(|info| self.matches_filter(info, &query))
+                    .collect();
+                if rows.is_empty() {
+                    v_flex()
+                        .gap_2()
+                        .p_3()
+                        .child(div().text_sm().text_color(muted).child("No templates match."))
+                        .child(
+                            h_flex().child(
+                                Button::new("scaffold-clear-filters")
+                                    .outline()
+                                    .small()
+                                    .label("Clear filters")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.search.update(cx, |search, cx| {
+                                            search.set_value("", window, cx);
+                                        });
+                                        this.set_tag_filter(None, cx);
+                                    })),
+                            ),
+                        )
+                        .into_any_element()
+                } else {
+                    v_flex()
+                        .children(
+                            rows.iter()
+                                .enumerate()
+                                .map(|(index, info)| self.render_row(index, info, cx)),
+                        )
+                        .children(list.problems.iter().map(|problem| {
+                            div()
+                                .px_3()
+                                .py_1()
+                                .text_xs()
+                                .text_color(danger)
+                                .child(problem.clone())
+                        }))
+                        .into_any_element()
+                }
+            }
+        };
+
+        // The search box and tag chips sit above the list, outside its scroll.
+        let filters = match &self.listing {
+            Listing::Ready(list) if !list.generators.is_empty() => {
+                let shown = list
+                    .generators
+                    .iter()
+                    .filter(|info| self.matches_filter(info, &query))
+                    .count();
+                Some(self.render_filters(list, shown, cx))
+            }
+            _ => None,
         };
 
         // Every root fills the dock, loading and error states included.
@@ -497,6 +657,7 @@ impl Render for ScaffoldPanel {
                     .text_color(muted)
                     .child(notice)
             }))
+            .children(filters)
             // The list scrolls inside the panel: there are dozens of rows, and
             // the header stays put above them.
             .child(

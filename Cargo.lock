@@ -18183,6 +18183,7 @@ name = "scaffold_panel"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "db",
  "forge-scaffold",
  "fs",
  "futures 0.3.34",

@@ -12,6 +12,7 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+db.workspace = true
 forge-scaffold.workspace = true
 fs.workspace = true
 futures.workspace = true
