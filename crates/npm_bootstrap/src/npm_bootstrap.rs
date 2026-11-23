@@ -10,6 +10,11 @@
 //! is in Restricted Mode (the offer is made when it is trusted), and the
 //! install runs in the Script Runner, which asks `forge_trust_gate` and shows
 //! the output as it goes (an install can take minutes).
+//!
+//! A project the Scaffold panel has just made can ask for more: with "Run
+//! install afterwards" on, the install starts by itself once the project is
+//! trusted, without the click (`prepare_install_offer`). The offer is made either
+//! way.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -21,7 +26,7 @@ use gpui::{
     App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
     Subscription, WeakEntity, Window,
 };
-use gpui_component::spinner::Spinner;
+use gpui_component::{Sizable as _, spinner::Spinner};
 use project::{Event as ProjectEvent, Worktree};
 use script_runner_panel::ScriptRunnerPanel;
 use ui::prelude::*;
@@ -39,54 +44,106 @@ pub fn init(cx: &mut App) {
 /// fall back to waiting for the first `WorktreeAdded` event rather than
 /// assuming `worktrees(cx)` is non-empty here.
 fn maybe_offer_install(workspace: &mut Workspace, cx: &mut Context<Workspace>) {
-    // A restricted project is offered nothing yet, so the offer is made again
-    // when its trust changes (`check_worktree` asks once, by its marker).
-    forge_trust::on_trust_changed(cx, |workspace, cx| {
-        let first_worktree = workspace.worktrees(cx).next();
-        if let Some(worktree) = first_worktree {
-            check_worktree(workspace, &worktree, cx);
-        }
-    })
-    .detach();
+    // Whether this window's offer has been decided (made, or nothing to make).
+    // Every way in below shares it, so none of them can make the offer twice.
+    let handled = Rc::new(Cell::new(false));
 
-    let first_worktree = workspace.worktrees(cx).next();
-    if let Some(worktree) = first_worktree {
-        check_worktree(workspace, &worktree, cx);
-        return;
+    // A project that is not trusted yet is offered nothing, so the offer is made
+    // when its trust changes.
+    {
+        let handled = handled.clone();
+        forge_trust::on_trust_changed(cx, move |workspace, cx| {
+            try_offer(workspace, &handled, cx);
+        })
+        .detach();
     }
 
-    let project = workspace.project().clone();
-    let handled = Rc::new(Cell::new(false));
-    cx.subscribe(&project, move |workspace, project, event, cx| {
-        if handled.get() {
-            return;
+    // The first worktree isn't always attached the moment the `Workspace` is
+    // created (a project still being loaded).
+    {
+        let handled = handled.clone();
+        let project = workspace.project().clone();
+        cx.subscribe(&project, move |workspace, _, event, cx| {
+            if matches!(event, ProjectEvent::WorktreeAdded(_)) {
+                try_offer(workspace, &handled, cx);
+            }
+        })
+        .detach();
+    }
+
+    try_offer(workspace, &handled, cx);
+
+    // The trust gate publishes what it knows about a project a moment after its
+    // window opens, and that can happen before the change hook above exists, so
+    // for a while the answer is also asked for on a timer. Repeating is safe:
+    // `handled` stops it as soon as the offer has been decided.
+    cx.spawn(async move |workspace, cx| {
+        for _ in 0..40 {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let done = workspace
+                .update(cx, |workspace, cx| {
+                    try_offer(workspace, &handled, cx);
+                    handled.get()
+                })
+                .unwrap_or(true);
+            if done {
+                return;
+            }
         }
-        let ProjectEvent::WorktreeAdded(id) = event else {
-            return;
-        };
-        let Some(worktree) = project.read(cx).worktree_for_id(*id, cx) else {
-            return;
-        };
-        handled.set(true);
-        check_worktree(workspace, &worktree, cx);
+        // Not trusted by now: the hook above makes the offer when it is.
+        workspace
+            .update(cx, |workspace, cx| {
+                if let Some(worktree) = workspace.worktrees(cx).next() {
+                    let root = worktree.read(cx).abs_path();
+                    log::info!(
+                        "npm_bootstrap: no install offer for {} yet: {:?}",
+                        root.display(),
+                        forge_trust_gate::check(&root).err()
+                    );
+                }
+            })
+            .ok();
     })
     .detach();
 }
 
+/// Makes the offer for the window's first worktree, unless it has been decided.
+fn try_offer(workspace: &mut Workspace, handled: &Rc<Cell<bool>>, cx: &mut Context<Workspace>) {
+    if handled.get() {
+        return;
+    }
+    let first_worktree = workspace.worktrees(cx).next();
+    if let Some(worktree) = first_worktree
+        && check_worktree(workspace, &worktree, cx)
+    {
+        handled.set(true);
+    }
+}
+
+/// Decides the offer for `worktree`. `true` once it is decided (made, already
+/// made, or nothing to offer); `false` while the gate does not allow the folder
+/// yet, so it is asked again.
 fn check_worktree(
     workspace: &mut Workspace,
     worktree: &Entity<Worktree>,
     cx: &mut Context<Workspace>,
-) {
-    // Not while the project is in Restricted Mode: the install would run its own
-    // scripts. The trust-change hook above comes back here once it is trusted.
-    let project = workspace.project().clone();
-    if forge_trust::project_restricted(&project, cx) {
-        return;
-    }
+) -> bool {
+    // Only once the gate allows the folder: the install would run the project's own
+    // scripts, so not in Restricted Mode, and not before the editor has decided
+    // either. The gate is asked, not the trust store, because it is the gate the
+    // Script Runner asks when the install runs: asking anything else can say yes
+    // while the gate still says no (the install was then refused, after the offer
+    // had been used up). The trust-change hook comes back here when the answer
+    // changes.
     let root = worktree.read(cx).abs_path();
+    if let Err(reason) = forge_trust_gate::check(&root) {
+        log::debug!("npm_bootstrap: {} is not offered an install yet: {reason}", root.display());
+        return false;
+    }
     if !needs_install(&root) {
-        return;
+        return true;
     }
 
     let key = prompt_key(&root);
@@ -96,19 +153,49 @@ fn check_worktree(
         .flatten()
         .is_some()
     {
-        return;
+        log::info!("npm_bootstrap: the install was already offered for {}", root.display());
+        return true;
     }
+
+    // A project the Scaffold panel made with "Run install afterwards" on asked for
+    // the install to start by itself, now that it is trusted. The request is used
+    // up by this one install.
+    let automatic = KeyValueStore::global(cx)
+        .read_kvp(&auto_key(&root))
+        .ok()
+        .flatten()
+        .is_some();
 
     // "Ask once" means the marker goes down the moment the prompt is shown,
     // not only if the user accepts it — otherwise dismissing the toast would
     // just re-prompt on the next open.
     let kvp = KeyValueStore::global(cx);
+    let auto = auto_key(&root);
     cx.background_spawn(async move {
         kvp.write_kvp(key, "1".to_string()).await.ok();
+        if automatic {
+            kvp.delete_kvp(auto).await.ok();
+        }
     })
     .detach();
 
-    let install_root = root.to_path_buf();
+    log::info!(
+        "npm_bootstrap: {} the install for {}",
+        if automatic { "starting" } else { "offering" },
+        root.display()
+    );
+    if automatic {
+        start_install_when_ready(root.to_path_buf(), cx);
+    } else {
+        offer_install(workspace, root.to_path_buf(), cx);
+    }
+    true
+}
+
+enum NpmInstallPrompt {}
+
+/// The toast that asks whether to install; it waits for a click.
+fn offer_install(workspace: &mut Workspace, root: PathBuf, cx: &mut Context<Workspace>) {
     let workspace_handle = cx.weak_entity();
     workspace.show_toast(
         Toast::new(
@@ -116,13 +203,53 @@ fn check_worktree(
             "package.json found — install dependencies?",
         )
         .on_click("Run npm install", move |window, cx| {
-            run_npm_install(install_root.clone(), workspace_handle.clone(), window, cx);
+            let (root, workspace) = (root.clone(), workspace_handle.clone());
+            if let Some(workspace) = workspace.upgrade() {
+                workspace.update(cx, |workspace, cx| {
+                    start_install(workspace, &root, Some(window), cx);
+                });
+            }
         }),
         cx,
     );
 }
 
-enum NpmInstallPrompt {}
+/// Starts the install a project asked for, as soon as the Script Runner is
+/// there. The runner is loaded a moment after the window is, and a project that
+/// is already trusted gets here at once, so this waits for it for a few seconds;
+/// if it never comes, the usual toast is shown instead and the install waits for
+/// a click. Starts without a window, so the Script Runner is not revealed: the
+/// install toast has a "Show output" button for that.
+fn start_install_when_ready(root: PathBuf, cx: &mut Context<Workspace>) {
+    cx.spawn(async move |workspace, cx| {
+        for _ in 0..40 {
+            let ready = workspace
+                .update(cx, |workspace, cx| {
+                    workspace.panel::<ScriptRunnerPanel>(cx).is_some()
+                })
+                .unwrap_or(false);
+            if ready {
+                // If it did not start after all, the usual toast is shown too,
+                // so the request is not lost and a click can try again.
+                workspace
+                    .update(cx, |workspace, cx| {
+                        if !start_install(workspace, &root, None, cx) {
+                            offer_install(workspace, root.clone(), cx);
+                        }
+                    })
+                    .ok();
+                return;
+            }
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+        }
+        workspace
+            .update(cx, |workspace, cx| offer_install(workspace, root, cx))
+            .ok();
+    })
+    .detach();
+}
 
 /// What the Script Runner runs. Run with its output piped, as it is here, plain
 /// `npm install` prints nothing until it finishes, so an install of a thousand
@@ -133,52 +260,55 @@ enum NpmInstallPrompt {}
 /// which scripts run.
 const INSTALL_COMMAND: &str = "npm install --loglevel=http";
 
-/// Runs `npm install` in `root` in the Script Runner, whose output panel is
-/// revealed so the install can be watched. The Script Runner asks the trust gate
-/// itself, so a folder that is not trusted is refused there with its message.
-fn run_npm_install(
-    root: PathBuf,
-    workspace: WeakEntity<Workspace>,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let Some(workspace) = workspace.upgrade() else {
-        return;
+/// Runs `npm install` in `root` in the Script Runner. With a `window` the
+/// output panel is revealed so the install can be watched. The Script Runner
+/// asks the trust gate itself, so a folder that is not trusted is refused there
+/// with its message.
+///
+/// Called on the workspace itself, from inside its own update, so that it can be
+/// reached both from a toast's click (which updates the workspace first) and from
+/// the workspace's own hooks (which are already inside that update).
+fn start_install(
+    workspace: &mut Workspace,
+    root: &Path,
+    window: Option<&mut Window>,
+    cx: &mut Context<Workspace>,
+) -> bool {
+    let Some(runner) = workspace.panel::<ScriptRunnerPanel>(cx) else {
+        workspace.show_toast(
+            Toast::new(
+                NotificationId::unique::<NpmInstallResult>(),
+                "The Script Runner is not available, so npm install was not run.",
+            ),
+            cx,
+        );
+        return false;
     };
-    workspace.update(cx, |workspace, cx| {
-        let Some(runner) = workspace.panel::<ScriptRunnerPanel>(cx) else {
-            workspace.show_toast(
-                Toast::new(
-                    NotificationId::unique::<NpmInstallResult>(),
-                    "The Script Runner is not available, so npm install was not run.",
-                ),
-                cx,
-            );
-            return;
-        };
-        // The runner streams one command at a time: a run already going would
-        // swallow this one without a word.
-        if runner.read(cx).is_running() {
-            workspace.show_toast(
-                Toast::new(
-                    NotificationId::unique::<NpmInstallResult>(),
-                    "The Script Runner is busy. Stop the current run, then install.",
-                ),
-                cx,
-            );
-            return;
-        }
+    // The runner streams one command at a time: a run already going would
+    // swallow this one without a word.
+    if runner.read(cx).is_running() {
+        workspace.show_toast(
+            Toast::new(
+                NotificationId::unique::<NpmInstallResult>(),
+                "The Script Runner is busy. Stop the current run, then install.",
+            ),
+            cx,
+        );
+        return false;
+    }
+    if let Some(window) = window {
         workspace.reveal_panel::<ScriptRunnerPanel>(window, cx);
-        runner.update(cx, |runner, cx| {
-            runner.run_external(INSTALL_COMMAND.to_string(), root.display().to_string(), cx);
-        });
-        // A run that was refused (the folder is not trusted, say) never started:
-        // the toast then says so, instead of claiming an install is going.
-        let started = runner.read(cx).is_running();
-        let weak_workspace = cx.weak_entity();
-        let toast = cx.new(|cx| InstallToast::new(&runner, weak_workspace, started, cx));
-        workspace.toggle_status_toast(toast, cx);
+    }
+    runner.update(cx, |runner, cx| {
+        runner.run_external(INSTALL_COMMAND.to_string(), root.display().to_string(), cx);
     });
+    // A run that was refused (the folder is not trusted, say) never started:
+    // the toast then says so, instead of claiming an install is going.
+    let started = runner.read(cx).is_running();
+    let weak_workspace = cx.weak_entity();
+    let toast = cx.new(|cx| InstallToast::new(&runner, weak_workspace, started, cx));
+    workspace.toggle_status_toast(toast, cx);
+    started
 }
 
 enum NpmInstallResult {}
@@ -288,25 +418,27 @@ impl Render for InstallToast {
             .shadow_lg()
             .child(indicator)
             .child(Label::new(text).color(Color::Default))
+            // While it runs too: an install that started by itself did not reveal
+            // the Script Runner, and this is the way to it.
+            .child(
+                Button::new("npm-install-output", "Show output")
+                    .color(Color::Muted)
+                    .on_click(move |_, window, cx| {
+                        let workspace = workspace.clone();
+                        // After this click has finished: revealing a panel looks
+                        // at every docked panel, which must not happen while one
+                        // of them is being updated.
+                        window.defer(cx, move |window, cx| {
+                            workspace
+                                .update(cx, |workspace, cx| {
+                                    workspace.reveal_panel::<ScriptRunnerPanel>(window, cx);
+                                })
+                                .ok();
+                        });
+                    }),
+            )
             .when(finished, |this| {
                 this.child(
-                    Button::new("npm-install-output", "Show output")
-                        .color(Color::Muted)
-                        .on_click(move |_, window, cx| {
-                            let workspace = workspace.clone();
-                            // After this click has finished: revealing a panel looks
-                            // at every docked panel, which must not happen while one
-                            // of them is being updated.
-                            window.defer(cx, move |window, cx| {
-                                workspace
-                                    .update(cx, |workspace, cx| {
-                                        workspace.reveal_panel::<ScriptRunnerPanel>(window, cx);
-                                    })
-                                    .ok();
-                            });
-                        }),
-                )
-                .child(
                     IconButton::new("npm-install-dismiss", IconName::Close)
                         .icon_size(IconSize::Small)
                         .icon_color(Color::Muted)
@@ -337,14 +469,26 @@ impl ToastView for InstallToast {
     }
 }
 
-/// Records that the install offer for `root` has been dealt with, so it is not
-/// made: for a project whose creator already said the dependencies are not
-/// wanted. The same marker the offer itself leaves once it has been shown.
-pub fn decline_install_offer(root: &Path, cx: &mut App) {
+/// Sets up the install offer for a project that has just been created in `root`.
+/// The offer is always made when the project opens and is trusted. With
+/// `automatic` the install also starts by itself then, without a click: for a
+/// project made with "Run install afterwards" on.
+///
+/// It always forgets that the offer was made for `root` before: that marker is
+/// kept per folder path for good, so a name used before (a test project made,
+/// deleted and made again) would otherwise keep its old marker and never be
+/// offered the install.
+pub fn prepare_install_offer(root: &Path, automatic: bool, cx: &mut App) {
     let kvp = KeyValueStore::global(cx);
-    let key = prompt_key(root);
+    let asked = prompt_key(root);
+    let auto = auto_key(root);
     cx.background_spawn(async move {
-        kvp.write_kvp(key, "1".to_string()).await.ok();
+        kvp.delete_kvp(asked).await.ok();
+        if automatic {
+            kvp.write_kvp(auto, "1".to_string()).await.ok();
+        } else {
+            kvp.delete_kvp(auto).await.ok();
+        }
     })
     .detach();
 }
@@ -353,6 +497,13 @@ pub fn decline_install_offer(root: &Path, cx: &mut App) {
 /// never installed: it has a `package.json` file and no `node_modules`.
 fn needs_install(root: &Path) -> bool {
     root.join("package.json").is_file() && !root.join("node_modules").exists()
+}
+
+/// The key-value store key recording that a project asked for its install to
+/// start by itself once it is trusted. Set by [`prepare_install_offer`] and used
+/// up by the one install it starts.
+fn auto_key(root: &Path) -> String {
+    format!("npm-bootstrap-auto:{}", root.display())
 }
 
 /// The key-value store key recording that the install prompt was already

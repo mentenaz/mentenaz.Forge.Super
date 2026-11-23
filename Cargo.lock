@@ -13137,8 +13137,10 @@ version = "0.1.0"
 dependencies = [
  "db",
  "forge_trust",
+ "forge_trust_gate",
  "gpui",
  "gpui-component",
+ "log",
  "project",
  "script_runner_panel",
  "tempfile",

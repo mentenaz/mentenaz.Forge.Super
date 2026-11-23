@@ -30,8 +30,13 @@ activity, not a percentage (npm cannot know the total up front on a first instal
 
 `npm install` runs the project's own `preinstall` and `postinstall` scripts, so the
 offer is **not made while the project is in Restricted Mode**. It is made when the
-project becomes trusted. A project made by the Scaffold panel with "Run install
-afterwards" turned off is marked as already offered, and gets no offer.
+project becomes trusted.
+
+A project made by the Scaffold panel always gets the offer too, even if a folder
+with the same name was offered before. With "Run install afterwards" turned **on**,
+the install starts by itself as soon as the project is trusted, without the click;
+its toast has a "Show output" button for the Script Runner. With it turned off, the
+toast waits for a click as usual.
 
 The offer is made **once per project directory**. The marker is written as
 soon as the toast is shown, so dismissing it does not bring it back next

@@ -959,12 +959,15 @@ impl NewProjectView {
                 this.creation = match result {
                     Ok(created) => {
                         Self::remember_location(&chosen, cx);
-                        // The install offer a new window makes for a project with a
-                        // package.json is not wanted when "Run install afterwards"
-                        // was left off.
-                        if !created.install_requested {
-                            npm_bootstrap::decline_install_offer(&created.target, cx);
-                        }
+                        // A new window always offers to install a project that has a
+                        // package.json, once it is trusted, even if this folder name
+                        // was used (and offered) before. "Run install afterwards"
+                        // decides whether it also starts by itself, without a click.
+                        npm_bootstrap::prepare_install_offer(
+                            &created.target,
+                            created.install_requested,
+                            cx,
+                        );
                         Creation::Done(created)
                     }
                     Err(error) => Creation::Failed(error),
@@ -1186,9 +1189,15 @@ impl NewProjectView {
                                     div().text_xs().text_color(muted).child(format!("• {step}"))
                                 }))
                                 .child(div().text_xs().text_color(muted).child(
-                                    "Open the project: once you trust it, Forge offers to \
-                                     install the dependencies and shows the output in the \
-                                     Script Runner. Anything else here you run yourself.",
+                                    if created.install_requested {
+                                        "Open the project: once you trust it, the install \
+                                         starts by itself and its output appears in the \
+                                         Script Runner. Anything else here you run yourself."
+                                    } else {
+                                        "Open the project: once you trust it, Forge offers to \
+                                         install the dependencies. Anything else here you run \
+                                         yourself."
+                                    },
                                 )),
                         )
                     })
