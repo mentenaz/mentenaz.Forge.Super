@@ -235,7 +235,7 @@ fn templates_dir() -> PathBuf {
 }
 
 /// Where a template comes from.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Source {
     /// Built from the output of Microsoft's `yo` generator and then edited.
     /// Whether that may be redistributed has not been confirmed (see the notice in
