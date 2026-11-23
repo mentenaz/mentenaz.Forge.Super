@@ -36,7 +36,7 @@ use gpui_component::{
     form::{field, v_form},
     h_flex,
     input::{Input, InputEvent, InputState},
-    panel_header::PanelHeader,
+    panel_header::{PanelHeader, zoom_button},
     resizable::{h_resizable, resizable_panel},
     setting::{SettingGroup, SettingItem, SettingPage, Settings},
     spinner::Spinner,
@@ -373,6 +373,8 @@ fn remembered_names(
 
 pub struct DatabasePanel {
     focus_handle: FocusHandle,
+    /// The dock is zoomed to fill the window; see `Panel::set_zoomed`.
+    zoomed: bool,
     /// Held so the "Workbench" button can open/activate a real workspace tab
     /// (`workbench::WorkbenchTab`) — see `workbench::open`.
     workspace: WeakEntity<Workspace>,
@@ -577,6 +579,7 @@ impl DatabasePanel {
 
             Self {
                 focus_handle: cx.focus_handle(),
+                zoomed: false,
                 workspace: workspace_handle,
                 connections,
                 active_type,
@@ -2625,9 +2628,39 @@ impl Focusable for DatabasePanel {
 
 impl EventEmitter<PanelEvent> for DatabasePanel {}
 
+impl DatabasePanel {
+    /// Fills the window with this panel, or goes back (the header button and
+    /// `workspace::ToggleZoom`). The workspace does the zooming when it hears
+    /// the event, and then calls `set_zoomed`.
+    fn toggle_zoom(
+        &mut self,
+        _: &workspace::ToggleZoom,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.zoomed {
+            cx.emit(PanelEvent::ZoomOut);
+        } else {
+            if !self.focus_handle.contains_focused(window, cx) {
+                cx.focus_self(window);
+            }
+            cx.emit(PanelEvent::ZoomIn);
+        }
+    }
+}
+
 impl Panel for DatabasePanel {
     fn persistent_name() -> &'static str {
         "Database Panel"
+    }
+
+    fn is_zoomed(&self, _window: &Window, _cx: &App) -> bool {
+        self.zoomed
+    }
+
+    fn set_zoomed(&mut self, zoomed: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        self.zoomed = zoomed;
+        cx.notify();
     }
 
     fn panel_key() -> &'static str {
@@ -2779,9 +2812,17 @@ impl Render for DatabasePanel {
             .track_focus(&self.focus_handle(cx))
             .size_full()
             .bg(cx.theme().sidebar)
+            .on_action(cx.listener(Self::toggle_zoom))
             .child(
                 PanelHeader::new("Database")
-                    .icon(Icon::new(GIconName::Database).text_color(cx.theme().foreground)),
+                    .icon(Icon::new(GIconName::Database).text_color(cx.theme().foreground))
+                    .action(zoom_button(
+                        "database-zoom",
+                        self.zoomed,
+                        cx.listener(|this, _, window, cx| {
+                            this.toggle_zoom(&workspace::ToggleZoom, window, cx)
+                        }),
+                    )),
             )
             .child(self.render_type_tabs(cx))
             .child(self.render_connection_tabs(&connections, cx))

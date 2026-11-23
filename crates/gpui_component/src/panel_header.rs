@@ -1,9 +1,38 @@
 use gpui::{
-    AnyElement, App, FontWeight, IntoElement, ParentElement, RenderOnce, SharedString, Styled,
-    Window, div, px,
+    AnyElement, App, ClickEvent, ElementId, FontWeight, IntoElement, ParentElement, RenderOnce,
+    SharedString, Styled, Window, div, px,
 };
 
-use crate::{ActiveTheme, h_flex, separator::Separator, v_flex};
+use crate::{
+    ActiveTheme, IconName, Sizable as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
+    separator::Separator,
+    v_flex,
+};
+
+/// The header button a panel that docks at the bottom uses to fill the whole
+/// window and to go back, as the stock bottom panels (terminal, debugger) do.
+/// It only draws the button and passes the click on: the panel keeps the
+/// `zoomed` flag, implements `Panel::is_zoomed`/`set_zoomed`, and emits
+/// `PanelEvent::ZoomIn` or `ZoomOut` from `on_click`, which is what makes the
+/// workspace zoom its dock.
+pub fn zoom_button(
+    id: impl Into<ElementId>,
+    zoomed: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Button {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .icon(if zoomed {
+            IconName::Minimize
+        } else {
+            IconName::Maximize
+        })
+        .tooltip(if zoomed { "Restore" } else { "Full screen" })
+        .on_click(on_click)
+}
 
 /// The standard tool-panel header: `[icon] [title]  [actions...]` over a
 /// full-width divider. Every ported `forge_shell` panel (Cockpit, Processes,

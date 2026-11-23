@@ -35,7 +35,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputEvent, InputState},
     menu::PopupMenu,
-    panel_header::PanelHeader,
+    panel_header::{PanelHeader, zoom_button},
     spinner::Spinner,
     table::{Column, ColumnFixed, ColumnSort, DataTable, TableDelegate, TableState},
     tag::Tag,
@@ -559,6 +559,8 @@ pub fn init(cx: &mut App) {
 
 pub struct ProcessesPanel {
     focus_handle: FocusHandle,
+    /// The dock is zoomed to fill the window; see `Panel::set_zoomed`.
+    zoomed: bool,
     system: Arc<Mutex<System>>,
     adopted: Adopted,
     table: Entity<TableState<ProcessTableDelegate>>,
@@ -661,6 +663,7 @@ impl ProcessesPanel {
 
             Self {
                 focus_handle: cx.focus_handle(),
+                zoomed: false,
                 system,
                 adopted,
                 table,
@@ -882,9 +885,39 @@ impl Focusable for ProcessesPanel {
 
 impl EventEmitter<PanelEvent> for ProcessesPanel {}
 
+impl ProcessesPanel {
+    /// Fills the window with this panel, or goes back (the header button and
+    /// `workspace::ToggleZoom`). The workspace does the zooming when it hears
+    /// the event, and then calls `set_zoomed`.
+    fn toggle_zoom(
+        &mut self,
+        _: &workspace::ToggleZoom,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.zoomed {
+            cx.emit(PanelEvent::ZoomOut);
+        } else {
+            if !self.focus_handle.contains_focused(window, cx) {
+                cx.focus_self(window);
+            }
+            cx.emit(PanelEvent::ZoomIn);
+        }
+    }
+}
+
 impl Panel for ProcessesPanel {
     fn persistent_name() -> &'static str {
         "Processes Panel"
+    }
+
+    fn is_zoomed(&self, _window: &Window, _cx: &App) -> bool {
+        self.zoomed
+    }
+
+    fn set_zoomed(&mut self, zoomed: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        self.zoomed = zoomed;
+        cx.notify();
     }
 
     fn panel_key() -> &'static str {
@@ -944,9 +977,17 @@ impl Render for ProcessesPanel {
             .on_action(cx.listener(Self::on_kill))
             .on_action(cx.listener(Self::on_kill_selected))
             .on_action(cx.listener(Self::on_toggle_adopt_selected))
+            .on_action(cx.listener(Self::toggle_zoom))
             .child(
                 PanelHeader::new("Processes")
-                    .icon(Icon::new(IconName::Cpu).text_color(cx.theme().foreground)),
+                    .icon(Icon::new(IconName::Cpu).text_color(cx.theme().foreground))
+                    .action(zoom_button(
+                        "processes-zoom",
+                        self.zoomed,
+                        cx.listener(|this, _, window, cx| {
+                            this.toggle_zoom(&workspace::ToggleZoom, window, cx)
+                        }),
+                    )),
             )
             .when_some(self.pending_kill.clone(), |el, (pid, name)| {
                 el.child(self.render_kill_confirm(pid, &name, cx))

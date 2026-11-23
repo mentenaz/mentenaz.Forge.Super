@@ -41,6 +41,7 @@ use gpui_component::{
     ActiveTheme, Sizable as _,
     h_flex, v_flex,
     input::{Input, InputState},
+    panel_header::zoom_button,
     spinner::Spinner,
 };
 pub use script_runner_panel_settings::ScriptRunnerPanelSettings;
@@ -249,6 +250,8 @@ pub fn init(cx: &mut App) {
 
 pub struct ScriptRunnerPanel {
     focus_handle: FocusHandle,
+    /// The dock is zoomed to fill the window; see `Panel::set_zoomed`.
+    zoomed: bool,
 
     /// Broadcast channel: the background runner thread sends `RunnerEvent`s
     /// here; the subscription in `new()` receives them and updates panel state.
@@ -373,6 +376,7 @@ impl ScriptRunnerPanel {
 
             ScriptRunnerPanel {
                 focus_handle: cx.focus_handle(),
+                zoomed: false,
                 event_tx,
                 command_input: None,
                 cwd,
@@ -717,9 +721,39 @@ impl Focusable for ScriptRunnerPanel {
 
 impl EventEmitter<PanelEvent> for ScriptRunnerPanel {}
 
+impl ScriptRunnerPanel {
+    /// Fills the window with this panel, or goes back (the header button and
+    /// `workspace::ToggleZoom`). The workspace does the zooming when it hears
+    /// the event, and then calls `set_zoomed`.
+    fn toggle_zoom(
+        &mut self,
+        _: &workspace::ToggleZoom,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.zoomed {
+            cx.emit(PanelEvent::ZoomOut);
+        } else {
+            if !self.focus_handle.contains_focused(window, cx) {
+                cx.focus_self(window);
+            }
+            cx.emit(PanelEvent::ZoomIn);
+        }
+    }
+}
+
 impl Panel for ScriptRunnerPanel {
     fn persistent_name() -> &'static str {
         "Script Runner Panel"
+    }
+
+    fn is_zoomed(&self, _window: &Window, _cx: &App) -> bool {
+        self.zoomed
+    }
+
+    fn set_zoomed(&mut self, zoomed: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        self.zoomed = zoomed;
+        cx.notify();
     }
 
     fn panel_key() -> &'static str {
@@ -838,7 +872,14 @@ impl Render for ScriptRunnerPanel {
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(format!("{} lines", self.output.len())),
-            );
+            )
+            .child(zoom_button(
+                "script-runner-zoom",
+                self.zoomed,
+                cx.listener(|this, _, window, cx| {
+                    this.toggle_zoom(&workspace::ToggleZoom, window, cx)
+                }),
+            ));
 
         // ── Command entry row ──
         let command_row = h_flex()
@@ -1128,6 +1169,7 @@ impl Render for ScriptRunnerPanel {
         v_flex()
             .id("script-runner-panel")
             .track_focus(&self.focus_handle(cx))
+            .on_action(cx.listener(Self::toggle_zoom))
             .w_full()
             .h_full()
             .overflow_hidden()
