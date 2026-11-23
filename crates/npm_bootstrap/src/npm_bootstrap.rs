@@ -124,6 +124,15 @@ fn check_worktree(
 
 enum NpmInstallPrompt {}
 
+/// What the Script Runner runs. Run with its output piped, as it is here, plain
+/// `npm install` prints nothing until it finishes, so an install of a thousand
+/// packages looks stuck for minutes. `--loglevel=http` makes npm report each
+/// registry request as it goes (first the package metadata, then the `.tgz`
+/// downloads), which scrolls in the panel and shows both that it is alive and
+/// roughly which phase it is in. It changes nothing about what is installed or
+/// which scripts run.
+const INSTALL_COMMAND: &str = "npm install --loglevel=http";
+
 /// Runs `npm install` in `root` in the Script Runner, whose output panel is
 /// revealed so the install can be watched. The Script Runner asks the trust gate
 /// itself, so a folder that is not trusted is refused there with its message.
@@ -161,7 +170,7 @@ fn run_npm_install(
         }
         workspace.reveal_panel::<ScriptRunnerPanel>(window, cx);
         runner.update(cx, |runner, cx| {
-            runner.run_external("npm install".to_string(), root.display().to_string(), cx);
+            runner.run_external(INSTALL_COMMAND.to_string(), root.display().to_string(), cx);
         });
         // A run that was refused (the folder is not trusted, say) never started:
         // the toast then says so, instead of claiming an install is going.

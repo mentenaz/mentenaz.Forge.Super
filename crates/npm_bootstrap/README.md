@@ -20,9 +20,13 @@ no `node_modules`, a toast appears:
 
 > package.json found — install dependencies?  **Run npm install**
 
-Clicking the button runs `npm install` in that folder in the Script Runner, which
-is revealed so the install can be watched (it can take minutes). The Script Runner
-asks the trust gate, so nothing runs in a folder that is not trusted.
+Clicking the button runs `npm install --loglevel=http` in that folder in the Script
+Runner, which is revealed so the install can be watched (it can take minutes). The
+Script Runner asks the trust gate, so nothing runs in a folder that is not trusted.
+The `--loglevel=http` flag makes npm print each registry request as it goes: plain
+`npm install` prints nothing until it finishes when its output is piped, so a large
+install would look stuck. The panel keeps the last 500 lines, so you see the latest
+activity, not a percentage (npm cannot know the total up front on a first install).
 
 `npm install` runs the project's own `preinstall` and `postinstall` scripts, so the
 offer is **not made while the project is in Restricted Mode**. It is made when the
