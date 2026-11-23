@@ -394,8 +394,10 @@ impl ScaffoldPanel {
         };
         let http = self.http.clone();
         workspace.update(cx, |workspace, cx| {
-            let view =
-                cx.new(|cx| NewProjectView::new(generator, title.into(), http, window, cx));
+            let weak_workspace = workspace.weak_handle();
+            let view = cx.new(|cx| {
+                NewProjectView::new(generator, title.into(), http, weak_workspace, window, cx)
+            });
             workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
         });
     }

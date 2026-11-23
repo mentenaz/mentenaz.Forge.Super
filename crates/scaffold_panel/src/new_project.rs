@@ -16,25 +16,27 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use db::kvp::KeyValueStore;
 use forge_scaffold::{
     Answers, DirSource, Manifest, NodeCheck, PlanOptions, PostAction, PostStepDescriptor, Prompt,
-    PromptKind, ScaffoldError, TemplateStore, VersionInfo, plan,
+    PromptKind, ScaffoldError, TemplateStore, VersionInfo, WriteProgress, apply, plan,
 };
+use futures::StreamExt as _;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder as _, px,
+    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, TaskExt as _,
+    WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Selectable as _, Sizable as _,
-    StyledExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Sizable as _, StyledExt as _,
     alert::Alert,
     button::{Button, ButtonVariants as _},
     form::{field, v_form},
     h_flex,
     input::{Input, InputState},
     list::ListItem,
+    progress::Progress,
     select::{Select, SelectEvent, SelectState},
     spinner::Spinner,
     stepper::{Stepper, StepperItem},
@@ -44,9 +46,13 @@ use gpui_component::{
 };
 use http_client::HttpClient;
 use serde_json::{Value, json};
-use workspace::item::Item;
+use workspace::{Workspace, item::Item};
 
 use crate::{HttpFetch, templates_dir};
+
+/// Where the last chosen location is remembered, so the next project starts
+/// from the same place.
+const LAST_LOCATION_KEY: &str = "scaffold_panel.last_location";
 
 /// What the tab shows instead of the form.
 enum Status {
@@ -107,11 +113,117 @@ enum Check {
     Failed(String),
 }
 
-/// The wizard's pages. Location and Create come in the next phase.
+/// The wizard's pages.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Step {
     Options,
     Review,
+    Location,
+    Create,
+}
+
+impl Step {
+    const ALL: [(Step, &'static str); 4] = [
+        (Step::Options, "Options"),
+        (Step::Review, "Review"),
+        (Step::Location, "Location"),
+        (Step::Create, "Create"),
+    ];
+
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|(step, _)| *step == self)
+            .unwrap_or(0)
+    }
+}
+
+/// What the Location page knows about the chosen folder: where the project
+/// would go, whether that is taken, and the warnings that depend on the place
+/// (a long path, a solution inside another).
+enum LocationCheck {
+    Idle,
+    Checking,
+    Ready {
+        target: PathBuf,
+        exists: bool,
+        warnings: Vec<String>,
+    },
+    Failed(String),
+}
+
+/// A project that has been written.
+struct Created {
+    target: PathBuf,
+    files: usize,
+    bytes: u64,
+    /// What the host would run afterwards, in words.
+    post: Vec<String>,
+}
+
+enum Creation {
+    Idle,
+    Running {
+        done: usize,
+        total: usize,
+        path: String,
+    },
+    Done(Created),
+    Failed(String),
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    }
+}
+
+/// The plan for `answers` at the chosen `location`: where the project would
+/// go and what depends on the place. Writes nothing; runs off the main thread.
+fn run_location_plan(
+    manifest: &Manifest,
+    dir: &PathBuf,
+    answers: &Answers,
+    location: &Path,
+) -> LocationCheck {
+    let source = DirSource::new(dir);
+    match plan(manifest, &source, answers, PlanOptions::new(location)) {
+        Ok(planned) => LocationCheck::Ready {
+            exists: planned.target.exists(),
+            warnings: planned.warnings.iter().map(|w| w.to_string()).collect(),
+            target: planned.target.clone(),
+        },
+        Err(error) => LocationCheck::Failed(error.to_string()),
+    }
+}
+
+/// Plans and writes the project at `location`. The engine refuses an existing
+/// folder and removes the one it made when a write fails. Runs off the main
+/// thread; `on_progress` is called once per file.
+fn run_create(
+    manifest: &Manifest,
+    dir: &PathBuf,
+    answers: &Answers,
+    location: &Path,
+    on_progress: impl FnMut(WriteProgress),
+) -> Result<Created, String> {
+    let source = DirSource::new(dir);
+    let planned = plan(manifest, &source, answers, PlanOptions::new(location))
+        .map_err(|error| error.to_string())?;
+    let post = planned
+        .post
+        .iter()
+        .map(|step| describe_post(step, &planned.target))
+        .collect();
+    let outcome = apply(&planned, on_progress).map_err(|error| error.to_string())?;
+    Ok(Created {
+        target: outcome.root,
+        files: outcome.files_written,
+        bytes: outcome.bytes_written,
+        post,
+    })
 }
 
 pub struct NewProjectView {
@@ -127,6 +239,13 @@ pub struct NewProjectView {
     node: NodeNotice,
     check: Check,
     step: Step,
+    /// Where the project will be created (its parent folder). Starts at the
+    /// last one used, else the home folder.
+    location: Option<PathBuf>,
+    location_check: LocationCheck,
+    creation: Creation,
+    /// To open the new project as a workspace.
+    workspace: WeakEntity<Workspace>,
     /// The review's file tree, made on the main thread from `Check::Valid`.
     review_tree: Option<Entity<TreeState>>,
     /// Bumped whenever another version is chosen, so a slow answer for the
@@ -267,6 +386,7 @@ impl NewProjectView {
         generator: String,
         title: SharedString,
         http: Arc<dyn HttpClient>,
+        workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -294,6 +414,10 @@ impl NewProjectView {
             node: NodeNotice::Idle,
             check: Check::Idle,
             step: Step::Options,
+            location: None,
+            location_check: LocationCheck::Idle,
+            creation: Creation::Idle,
+            workspace,
             review_tree: None,
             generation: 0,
             _subscriptions: vec![subscription],
@@ -360,6 +484,8 @@ impl NewProjectView {
         self.check = Check::Idle;
         self.review_tree = None;
         self.step = Step::Options;
+        self.location_check = LocationCheck::Idle;
+        self.creation = Creation::Idle;
         let installed = self
             .versions
             .iter()
@@ -688,34 +814,406 @@ impl NewProjectView {
         }
     }
 
-    /// The wizard: a stepper over the page for the current step.
-    fn render_wizard(&self, muted: gpui::Hsla, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let on_review = self.step == Step::Review;
-        // The Review step is only reached with "Next", which plans again, so a
-        // review never shows answers that have since been edited. The Options
-        // step can be clicked to go back.
-        let stepper = Stepper::new("scaffold-steps")
-            .selected_index(usize::from(on_review))
-            .items([
-                StepperItem::new().child("Options"),
-                StepperItem::new().disabled(!on_review).child("Review"),
-            ])
-            .on_click(cx.listener(|this, index: &usize, _, cx| {
-                if *index == 0 {
-                    this.step = Step::Options;
+    /// Moves to the Location page. The first time it starts from the last
+    /// location used, else the home folder.
+    fn go_to_location(&mut self, cx: &mut Context<Self>) {
+        self.step = Step::Location;
+        self.location_check = LocationCheck::Idle;
+        cx.notify();
+        if self.location.is_some() {
+            self.check_location(cx);
+            return;
+        }
+        let kvp = KeyValueStore::global(cx);
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_spawn(async move {
+                    kvp.read_kvp(LAST_LOCATION_KEY)
+                        .ok()
+                        .flatten()
+                        .map(PathBuf::from)
+                        .filter(|path| path.is_dir())
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.location.is_none() {
+                    this.location =
+                        Some(saved.unwrap_or_else(|| util::paths::home_dir().clone()));
+                }
+                this.check_location(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Plans at the chosen location to learn where the project would go, whether
+    /// that is taken, and the warnings that depend on the place.
+    fn check_location(&mut self, cx: &mut Context<Self>) {
+        let (Some(loaded), Some(location)) = (&self.loaded, self.location.clone()) else {
+            return;
+        };
+        let (manifest, dir) = (loaded.manifest.clone(), loaded.dir.clone());
+        let answers = self.collect_answers(cx);
+        self.location_check = LocationCheck::Checking;
+        cx.notify();
+        let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            let asked = location.clone();
+            let result = cx
+                .background_spawn(async move {
+                    run_location_plan(&manifest, &dir, &answers, &location)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                // Dropped if another version or another folder was chosen meanwhile.
+                if this.generation == generation && this.location.as_ref() == Some(&asked) {
+                    this.location_check = result;
                     cx.notify();
                 }
-            }));
-        let page = if on_review {
-            self.render_review_page(cx)
-        } else {
-            v_flex()
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn pick_location(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose Location".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = receiver.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                this.update(cx, |this, cx| {
+                    this.location = Some(path);
+                    this.check_location(cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn remember_location(location: &Path, cx: &mut Context<Self>) {
+        let kvp = KeyValueStore::global(cx);
+        let value = location.to_string_lossy().into_owned();
+        cx.background_spawn(async move {
+            kvp.write_kvp(LAST_LOCATION_KEY.to_string(), value).await.ok();
+        })
+        .detach();
+    }
+
+    /// Writes the project. The engine reports each file as it goes; the page
+    /// shows it, and a failed write leaves no half-made folder behind.
+    fn create_project(&mut self, cx: &mut Context<Self>) {
+        let (Some(loaded), Some(location)) = (&self.loaded, self.location.clone()) else {
+            return;
+        };
+        if matches!(self.creation, Creation::Running { .. }) {
+            return;
+        }
+        let (manifest, dir) = (loaded.manifest.clone(), loaded.dir.clone());
+        let answers = self.collect_answers(cx);
+        self.step = Step::Create;
+        self.creation = Creation::Running {
+            done: 0,
+            total: 0,
+            path: String::new(),
+        };
+        cx.notify();
+
+        let (sender, mut receiver) = futures::channel::mpsc::unbounded::<WriteProgress>();
+        let chosen = location.clone();
+        let work = cx.background_spawn(async move {
+            run_create(&manifest, &dir, &answers, &location, move |progress| {
+                sender.unbounded_send(progress).ok();
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            // Ends when the writer is done and has dropped its sender.
+            while let Some(progress) = receiver.next().await {
+                this.update(cx, |this, cx| {
+                    this.creation = Creation::Running {
+                        done: progress.index,
+                        total: progress.total,
+                        path: progress.path,
+                    };
+                    cx.notify();
+                })
+                .ok();
+            }
+            let result = work.await;
+            this.update(cx, |this, cx| {
+                this.creation = match result {
+                    Ok(created) => {
+                        Self::remember_location(&chosen, cx);
+                        Creation::Done(created)
+                    }
+                    Err(error) => Creation::Failed(error),
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Opens the new project in a window of its own, so the work in this one
+    /// stays where it is. A new folder opens in Restricted Mode like any other.
+    fn open_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Creation::Done(created) = &self.creation else {
+            return;
+        };
+        let target = created.target.clone();
+        let workspace = self.workspace.clone();
+        // Deferred until this click has finished. Opening a workspace looks at
+        // every item in the window to see if any is dirty, and this view is one
+        // of them: asked from inside this view's own update, that reads it while
+        // it is already borrowed, and gpui panics.
+        window.defer(cx, move |window, cx| {
+            workspace
+                .update(cx, |workspace, cx| {
+                    workspace
+                        .open_workspace_for_paths(
+                            workspace::OpenMode::NewWindow,
+                            vec![target],
+                            window,
+                            cx,
+                        )
+                        .detach_and_log_err(cx);
+                })
+                .ok();
+        });
+    }
+
+    /// A click on an earlier step of the stepper goes back to it. Not while the
+    /// project is being written.
+    fn go_to_step(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.step.index() || matches!(self.creation, Creation::Running { .. }) {
+            return;
+        }
+        let Some((step, _)) = Step::ALL.get(index) else {
+            return;
+        };
+        self.step = *step;
+        self.creation = Creation::Idle;
+        if self.step == Step::Location {
+            self.check_location(cx);
+        }
+        cx.notify();
+    }
+
+    /// The wizard: a stepper over the page for the current step.
+    fn render_wizard(&self, muted: gpui::Hsla, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let current = self.step.index();
+        // Later steps are reached only with "Next", which plans again, so a page
+        // never shows answers that have since been edited. An earlier step can
+        // be clicked to go back.
+        let stepper = Stepper::new("scaffold-steps")
+            .selected_index(current)
+            .items(Step::ALL.iter().enumerate().map(|(index, (_, label))| {
+                StepperItem::new().disabled(index > current).child(*label)
+            }))
+            .on_click(cx.listener(|this, index: &usize, _, cx| this.go_to_step(*index, cx)));
+        let page = match self.step {
+            Step::Options => v_flex()
                 .gap_3()
                 .children(self.render_node_notice(muted))
                 .child(self.render_form(cx))
-                .into_any_element()
+                .into_any_element(),
+            Step::Review => self.render_review_page(cx),
+            Step::Location => self.render_location_page(muted, cx),
+            Step::Create => self.render_create_page(muted, cx),
         };
         v_flex().gap_4().child(stepper).child(page).into_any_element()
+    }
+
+    /// The Location page: where the project goes, and whether that works.
+    fn render_location_page(&self, muted: gpui::Hsla, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let place = self
+            .location
+            .as_ref()
+            .map_or_else(|| "…".to_string(), |path| path.display().to_string());
+        let (status, can_create) = match &self.location_check {
+            LocationCheck::Idle | LocationCheck::Checking => {
+                (loading_row("Checking the location…", muted), false)
+            }
+            LocationCheck::Failed(error) => (
+                Alert::error("scaffold-location-failed", error.clone()).into_any_element(),
+                false,
+            ),
+            LocationCheck::Ready {
+                target,
+                exists,
+                warnings,
+            } => {
+                let mut column = v_flex().gap_2().child(
+                    div()
+                        .text_sm()
+                        .child(format!("The project will be created at {}", target.display())),
+                );
+                if *exists {
+                    column = column.child(Alert::error(
+                        "scaffold-exists",
+                        "A folder with this name already exists there. Choose another \
+                         location, or go back and change the name.",
+                    ));
+                }
+                column = column.children(warnings.iter().enumerate().map(|(index, warning)| {
+                    Alert::warning(("scaffold-location-warning", index), warning.clone())
+                }));
+                (column.into_any_element(), !*exists)
+            }
+        };
+        v_flex()
+            .gap_3()
+            .child(
+                field().label("Create in").child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().flex_1().min_w_0().truncate().text_sm().child(place))
+                        .child(
+                            Button::new("scaffold-choose-folder")
+                                .outline()
+                                .small()
+                                .label("Choose folder…")
+                                .on_click(cx.listener(|this, _, _, cx| this.pick_location(cx))),
+                        ),
+                ),
+            )
+            .child(status)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("scaffold-location-back")
+                            .outline()
+                            .label("Back")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.step = Step::Review;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("scaffold-create")
+                            .primary()
+                            .label("Create project")
+                            .disabled(!can_create)
+                            .on_click(cx.listener(|this, _, _, cx| this.create_project(cx))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// The Create page: progress while writing, then what was made.
+    fn render_create_page(&self, muted: gpui::Hsla, cx: &mut Context<Self>) -> gpui::AnyElement {
+        match &self.creation {
+            Creation::Idle => div().into_any_element(),
+            Creation::Running { done, total, path } => {
+                let percent = if *total == 0 {
+                    0.0
+                } else {
+                    *done as f32 / *total as f32 * 100.0
+                };
+                v_flex()
+                    .gap_2()
+                    .child(div().text_sm().child("Creating the project…"))
+                    .child(Progress::new("scaffold-progress").value(percent))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .truncate()
+                            .child(format!("{done} of {total}: {path}")),
+                    )
+                    .into_any_element()
+            }
+            Creation::Failed(error) => v_flex()
+                .gap_3()
+                .child(Alert::error("scaffold-create-failed", error.clone()))
+                .child(
+                    h_flex().child(
+                        Button::new("scaffold-create-back")
+                            .outline()
+                            .label("Back")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.step = Step::Location;
+                                this.creation = Creation::Idle;
+                                this.check_location(cx);
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .into_any_element(),
+            Creation::Done(created) => {
+                let target = created.target.clone();
+                v_flex()
+                    .gap_3()
+                    .child(Alert::success(
+                        "scaffold-created",
+                        format!(
+                            "Created {} ({} files, {}).",
+                            created.target.display(),
+                            created.files,
+                            human_size(created.bytes)
+                        ),
+                    ))
+                    .when(!created.post.is_empty(), |column| {
+                        column.child(
+                            v_flex()
+                                .gap_1()
+                                .child(div().text_sm().font_semibold().child("Afterwards"))
+                                .children(created.post.iter().map(|step| {
+                                    div().text_xs().text_color(muted).child(format!("• {step}"))
+                                }))
+                                .child(div().text_xs().text_color(muted).child(
+                                    "Running these comes in the next phase. For now, open the \
+                                     project and run them yourself.",
+                                )),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("scaffold-open-project")
+                                    .primary()
+                                    .label("Open project")
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| {
+                                            this.open_project(window, cx)
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                Button::new("scaffold-reveal")
+                                    .outline()
+                                    .label("Show in file explorer")
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.reveal_path(&target);
+                                    })),
+                            )
+                            .child(
+                                Button::new("scaffold-another")
+                                    .ghost()
+                                    .label("Create another")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.step = Step::Options;
+                                        this.creation = Creation::Idle;
+                                        this.check = Check::Idle;
+                                        this.review_tree = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .into_any_element()
+            }
+        }
     }
 
     /// The Review page: the review, and a way back to the options.
@@ -734,15 +1232,23 @@ impl NewProjectView {
             .gap_3()
             .child(self.render_review(folder, files, *bytes, warnings, post, cx))
             .child(
-                h_flex().gap_2().child(
-                    Button::new("scaffold-back")
-                        .outline()
-                        .label("Back")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.step = Step::Options;
-                            cx.notify();
-                        })),
-                ),
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("scaffold-back")
+                            .outline()
+                            .label("Back")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.step = Step::Options;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("scaffold-next-location")
+                            .primary()
+                            .label("Next: choose location")
+                            .on_click(cx.listener(|this, _, _, cx| this.go_to_location(cx))),
+                    ),
             )
             .into_any_element()
     }
@@ -760,11 +1266,7 @@ impl NewProjectView {
     ) -> gpui::AnyElement {
         let theme = cx.theme();
         let (muted, border) = (theme.muted_foreground, theme.border);
-        let size = if bytes >= 1024 * 1024 {
-            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-        } else {
-            format!("{:.1} KB", bytes as f64 / 1024.0)
-        };
+        let size = human_size(bytes);
 
         // The tree is a virtual list, so it needs a height of its own.
         let tree_view = match &self.review_tree {
@@ -839,7 +1341,7 @@ impl NewProjectView {
                 div()
                     .text_xs()
                     .text_color(muted)
-                    .child("Choosing where to create it, and creating it, comes next."),
+                    .child("Next you choose where to create it. Nothing is written yet."),
             )
             .into_any_element()
     }
