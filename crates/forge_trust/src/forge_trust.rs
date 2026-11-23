@@ -25,7 +25,7 @@ use gpui::{
 use gpui_component::{
     ActiveTheme, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants as _},
-    v_flex,
+    h_flex, v_flex,
 };
 use project::{
     Project,
@@ -159,6 +159,43 @@ pub fn on_trust_changed<T: 'static>(
     on_changed: impl Fn(&mut T, &mut Context<T>) + 'static,
 ) -> Subscription {
     cx.observe_global::<TrustEpoch>(move |this, cx| on_changed(this, cx))
+}
+
+/// A slim banner for a panel that stays usable while its project is restricted
+/// but refuses some of its actions: `message` says which, and the button asks to
+/// trust the project, the same way [`restricted_notice`] does.
+pub fn restricted_banner(message: &str, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    h_flex()
+        .w_full()
+        .flex_shrink_0()
+        .gap_2()
+        .items_center()
+        .px_3()
+        .py_2()
+        .border_b_1()
+        .border_color(theme.border)
+        .bg(theme.warning.opacity(0.1))
+        .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_xs()
+                .text_color(theme.foreground)
+                .child(message.to_string()),
+        )
+        .child(
+            Button::new("forge-trust-banner")
+                .outline()
+                .small()
+                .label("Trust project")
+                .on_click(|_, window, cx| {
+                    if let Ok(action) = cx.build_action("workspace::ToggleWorktreeSecurity", None) {
+                        window.dispatch_action(action, cx);
+                    }
+                }),
+        )
 }
 
 /// What a panel shows instead of its content while its project is restricted.

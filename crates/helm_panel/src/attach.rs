@@ -195,6 +195,22 @@ impl HelmPanel {
         }
     }
 
+    /// A banner for the top of the panel while the workspace's project is in
+    /// Restricted Mode. The panel stays usable (the profile, organisations and
+    /// GitHub search have nothing to do with the folder); only the actions that
+    /// run `git` in the folder are refused, and the banner says so.
+    pub(super) fn render_trust_banner(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let project = self.workspace.upgrade()?.read(cx).project().clone();
+        forge_trust::project_restricted(&project, cx).then(|| {
+            forge_trust::restricted_banner(
+                "This project is in Restricted Mode, so publishing it to GitHub is \
+                 turned off until you trust it.",
+                cx,
+            )
+            .into_any_element()
+        })
+    }
+
     /// The first directory worktree of this window's workspace: where a
     /// repository is created or connected.
     fn workspace_root(&self, cx: &mut App) -> Option<PathBuf> {

@@ -845,6 +845,7 @@ impl Render for HelmPanel {
                     .when(show_nav, |row| row.child(self.render_nav_bar(cx))),
             )
             .child(Separator::horizontal())
+            .children(self.render_trust_banner(cx))
             .children(self.render_identity_header(cx))
             .child(
                 v_flex()
