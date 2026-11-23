@@ -8,6 +8,7 @@
 //! own; everything slow here (reading the templates folder, the index check and
 //! the downloads) runs in `cx.background_spawn`, never on the main thread.
 
+mod edit_solution;
 mod new_project;
 mod scaffold_panel_settings;
 
@@ -46,6 +47,7 @@ use workspace::{
     dock::{DockPosition, Panel, PanelEvent},
 };
 
+use crate::edit_solution::EditSolutionView;
 use crate::new_project::NewProjectView;
 use crate::scaffold_panel_settings::ScaffoldPanelSettings;
 
@@ -119,6 +121,12 @@ pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {
         workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
             workspace.toggle_panel_focus::<ScaffoldPanel>(window, cx);
+        });
+        // The Node panel's gear on an SPFx solution.
+        workspace.register_action(|workspace, action: &zed_actions::scaffold::EditSolution, window, cx| {
+            let root = action.path.clone();
+            let view = cx.new(|cx| EditSolutionView::new(root, window, cx));
+            workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
         });
     })
     .detach();

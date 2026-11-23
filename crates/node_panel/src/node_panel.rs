@@ -3894,9 +3894,33 @@ impl NodePanel {
                 .child(Tag::primary().child(badge_text))
                 .child(
                     div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
                         .text_xs()
                         .text_color(theme.muted_foreground)
                         .child("SharePoint solution detected"),
+                )
+                .child(
+                    // Opens the tab that edits the solution's name, description
+                    // and version (the Scaffold panel owns it).
+                    Button::new("spfx-edit-solution")
+                        .custom(ButtonCustomVariant::new(cx).foreground(theme.muted_foreground))
+                        .xsmall()
+                        .icon(IconName::Settings)
+                        .tooltip("Edit solution name, description and version")
+                        .on_click(cx.listener(|this, _e, window, cx| {
+                            let path = this
+                                .selected_project
+                                .clone()
+                                .unwrap_or_else(|| this.cwd.clone());
+                            window.dispatch_action(
+                                Box::new(zed_actions::scaffold::EditSolution {
+                                    path: PathBuf::from(path),
+                                }),
+                                cx,
+                            );
+                        })),
                 ),
         );
 

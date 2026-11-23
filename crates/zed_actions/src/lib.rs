@@ -258,6 +258,23 @@ pub mod npm_manager {
        }
 }
 
+pub mod scaffold {
+    use gpui::Action;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+    use std::path::PathBuf;
+
+    /// Opens the tab that edits the name, description and version of the SPFx
+    /// solution in the folder `path`.
+    #[derive(Clone, Default, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = scaffold)]
+    #[serde(deny_unknown_fields)]
+    pub struct EditSolution {
+        #[serde(default)]
+        pub path: PathBuf,
+    }
+}
+
 pub mod editor {
     use gpui::actions;
     actions!(
