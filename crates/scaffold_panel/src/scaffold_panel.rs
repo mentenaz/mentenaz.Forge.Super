@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use forge_scaffold::{
-    CheckStatus, ENV_TEMPLATES_ROOT, Fetch, FetchResult, GeneratorInfo, GeneratorList,
-    ScaffoldError, TemplateStore, unix_now,
+    AvailableUpdate, CheckStatus, ENV_TEMPLATES_ROOT, Fetch, FetchResult, GeneratorInfo,
+    GeneratorList, ScaffoldError, TemplateStore, UpdateKind, unix_now,
 };
 use futures::AsyncReadExt as _;
 use gpui::{
@@ -206,6 +206,9 @@ pub struct ScaffoldPanel {
     tag_filter: Option<String>,
     /// Which tab of the list is showing. Remembered between sessions.
     tab: ListTab,
+    /// What the index on disk says could be downloaded or updated; the rows tag
+    /// an installed template that has a newer revision.
+    updates: Vec<AvailableUpdate>,
     _search_subscription: Subscription,
 }
 
@@ -220,27 +223,108 @@ fn templates_dir() -> PathBuf {
     }
 }
 
+/// Where a template comes from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// Built from the output of Microsoft's `yo` generator and then edited.
+    /// Whether that may be redistributed has not been confirmed (see the notice in
+    /// the templates repo).
+    Legacy,
+    /// Microsoft's own MIT-licensed `SharePoint/spfx` templates.
+    Microsoft,
+    /// The `create-vite` templates (MIT), with Forge's overlay.
+    CreateVite,
+    /// Made for Forge.
+    Forge,
+}
+
+impl Source {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Source::Legacy => "Legacy",
+            Source::Microsoft => "Microsoft SPFx",
+            Source::CreateVite => "create-vite",
+            Source::Forge => "Forge",
+        }
+    }
+}
+
+/// The one generator built from the `yo` output (versions 1.20.0 to 1.23.2).
+pub(crate) const LEGACY_SPFX_GENERATOR: &str = "spfx-webpart";
+
+/// Where the template `id` comes from, read from its id and tags. The index has
+/// no source field, so this is what the index lists today: exact for it, but a
+/// stopgap. The proper fix is for the index to say (an optional `source` on each
+/// entry), and this then reads that. An id that matches nothing gets no label.
+pub(crate) fn source_of(id: &str, tags: &[String]) -> Option<Source> {
+    let tagged = |tag: &str| tags.iter().any(|candidate| candidate == tag);
+    if id == LEGACY_SPFX_GENERATOR {
+        Some(Source::Legacy)
+    } else if tagged("spfx") {
+        Some(Source::Microsoft)
+    } else if id.starts_with("vite-") && tagged("vite") {
+        Some(Source::CreateVite)
+    } else if matches!(id, "fullstack" | "backend-api") {
+        Some(Source::Forge)
+    } else {
+        None
+    }
+}
+
+/// The list and what the index says could be downloaded or updated.
+type Listed = (GeneratorList, Vec<AvailableUpdate>);
+
 /// Reads the templates folder: no network. Runs off the main thread.
-fn read_listing() -> std::result::Result<GeneratorList, String> {
+fn read_listing() -> std::result::Result<Listed, String> {
     let store = TemplateStore::open(templates_dir()).map_err(|error| error.to_string())?;
-    store.list_generators().map_err(|error| error.to_string())
+    let list = store.list_generators().map_err(|error| error.to_string())?;
+    // From the index already on disk; without one there is simply nothing to say.
+    let updates = store.pending_updates().unwrap_or_default();
+    Ok((list, updates))
 }
 
 /// Checks the index now (a manual check ignores the interval), then reads the
 /// list again. Blocks on the network: runs off the main thread.
-fn check_and_read(fetch: &HttpFetch) -> std::result::Result<(String, GeneratorList), String> {
+fn check_and_read(fetch: &HttpFetch) -> std::result::Result<(String, Listed), String> {
     let store = TemplateStore::open(templates_dir()).map_err(|error| error.to_string())?;
     let outcome = store
         .check_updates(fetch, INDEX_URL, unix_now(), true, 0)
         .map_err(|error| error.to_string())?;
-    let notice = match (outcome.status, outcome.updates.len()) {
-        (CheckStatus::Skipped, _) => "Checked a moment ago.".to_string(),
-        (_, 0) => "Templates are up to date.".to_string(),
-        (_, 1) => "1 template can be downloaded or updated.".to_string(),
-        (_, count) => format!("{count} templates can be downloaded or updated."),
+    // An installed template with a newer revision is an update; anything else
+    // the index lists that is not on this machine is a download.
+    let revised = outcome
+        .updates
+        .iter()
+        .filter(|update| matches!(update.kind, UpdateKind::Revised { .. }))
+        .count();
+    let new = outcome.updates.len() - revised;
+    let plural = |count: usize, one: &str, many: &str| {
+        if count == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{count} {many}")
+        }
+    };
+    let notice = match (outcome.status, revised, new) {
+        (CheckStatus::Skipped, _, _) => "Checked a moment ago.".to_string(),
+        (_, 0, 0) => "Templates are up to date.".to_string(),
+        (_, 0, new) => format!(
+            "{} can be downloaded.",
+            plural(new, "template", "templates")
+        ),
+        (_, revised, 0) => format!(
+            "{} can be updated.",
+            plural(revised, "installed template", "installed templates")
+        ),
+        (_, revised, new) => format!(
+            "{} can be updated, and {} downloaded.",
+            plural(revised, "installed template", "installed templates"),
+            plural(new, "more", "more")
+        ),
     };
     let list = store.list_generators().map_err(|error| error.to_string())?;
-    Ok((notice, list))
+    let updates = store.pending_updates().unwrap_or_default();
+    Ok((notice, (list, updates)))
 }
 
 impl ScaffoldPanel {
@@ -278,6 +362,7 @@ impl ScaffoldPanel {
                 search,
                 tag_filter: None,
                 tab: ListTab::All,
+                updates: Vec::new(),
                 _search_subscription: search_subscription,
             };
             panel.reload(cx);
@@ -461,7 +546,10 @@ impl ScaffoldPanel {
             let result = cx.background_spawn(async { read_listing() }).await;
             this.update(cx, |this, cx| {
                 this.listing = match result {
-                    Ok(list) => Listing::Ready(list),
+                    Ok((list, updates)) => {
+                        this.updates = updates;
+                        Listing::Ready(list)
+                    }
                     Err(error) => Listing::Failed(error),
                 };
                 cx.notify();
@@ -489,8 +577,9 @@ impl ScaffoldPanel {
             this.update(cx, |this, cx| {
                 this.checking = false;
                 match result {
-                    Ok((notice, list)) => {
+                    Ok((notice, (list, updates))) => {
                         this.notice = Some(notice);
+                        this.updates = updates;
                         this.listing = Listing::Ready(list);
                     }
                     Err(error) => this.notice = Some(format!("Could not check: {error}")),
@@ -542,6 +631,21 @@ impl ScaffoldPanel {
         } else {
             ("Available", theme.info)
         };
+        let tint = |color: gpui::Hsla, text: &'static str| {
+            Tag::custom(color.opacity(0.2), color, color.opacity(0.3))
+                .small()
+                .child(text)
+        };
+        let source = source_of(&info.id, &info.tags);
+        // An installed template whose revision the index has since replaced.
+        let has_update = self.updates.iter().any(|update| {
+            update.generator == info.id && matches!(update.kind, UpdateKind::Revised { .. })
+        });
+        let detail = match source {
+            Some(source) => format!("Latest: {} · {}", info.latest_version, source.label()),
+            None => format!("Latest: {}", info.latest_version),
+        };
+        let (legacy, update_color) = (theme.warning, theme.primary);
         v_flex()
             .id(("scaffold-generator", index))
             .gap_1()
@@ -570,11 +674,16 @@ impl ScaffoldPanel {
                             .child(info.title.clone()),
                     )
                     .child(
-                        div().flex_shrink_0().child(
-                            Tag::custom(color.opacity(0.2), color, color.opacity(0.3))
-                                .small()
-                                .child(label),
-                        ),
+                        h_flex()
+                            .flex_shrink_0()
+                            .gap_1()
+                            .when(source == Some(Source::Legacy), |tags| {
+                                tags.child(tint(legacy, "Legacy"))
+                            })
+                            .when(has_update, |tags| {
+                                tags.child(tint(update_color, "Update available"))
+                            })
+                            .child(tint(color, label)),
                     ),
             )
             .children(
@@ -583,12 +692,7 @@ impl ScaffoldPanel {
                     .filter(|description| !description.is_empty())
                     .map(|description| div().text_xs().text_color(muted).child(description)),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(format!("Latest: {}", info.latest_version)),
-            )
+            .child(div().text_xs().text_color(muted).child(detail))
             .into_any_element()
     }
 }
@@ -820,5 +924,52 @@ impl Render for ScaffoldPanel {
                     .overflow_y_scroll()
                     .child(body),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tags(tags: &[&str]) -> Vec<String> {
+        tags.iter().map(|tag| tag.to_string()).collect()
+    }
+
+    // The ids and tags are those of the live index (22 November 2026).
+    #[test]
+    fn the_yo_derived_generator_is_the_only_legacy_one() {
+        assert_eq!(
+            source_of("spfx-webpart", &tags(&["react", "spfx", "webpart"])),
+            Some(Source::Legacy)
+        );
+        // Tagged `spfx` too, but Microsoft's own.
+        assert_eq!(
+            source_of("webpart-react", &tags(&["spfx", "webpart"])),
+            Some(Source::Microsoft)
+        );
+    }
+
+    #[test]
+    fn the_other_sources_are_told_apart() {
+        assert_eq!(
+            source_of("extension-application-customizer", &tags(&["extension", "spfx"])),
+            Some(Source::Microsoft)
+        );
+        assert_eq!(
+            source_of("vite-react-ts", &tags(&["frontend", "react", "typescript", "vite"])),
+            Some(Source::CreateVite)
+        );
+        assert_eq!(
+            source_of("fullstack", &tags(&["fastify", "fullstack", "vite"])),
+            Some(Source::Forge)
+        );
+        assert_eq!(source_of("backend-api", &tags(&["api", "backend"])), Some(Source::Forge));
+    }
+
+    #[test]
+    fn a_template_that_matches_nothing_gets_no_label() {
+        assert_eq!(source_of("my-own-template", &tags(&["mine"])), None);
+        // A vite id needs the tag too.
+        assert_eq!(source_of("vite-thing", &tags(&[])), None);
     }
 }

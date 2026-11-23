@@ -323,6 +323,19 @@ fn node_notice(manifest: &Manifest) -> NodeNotice {
     }
 }
 
+/// What to say when a downloaded template cannot be read. A manifest this
+/// version of the engine does not understand is what a template made for a newer
+/// Forge Super looks like; a damaged one looks the same, so both are named.
+fn describe_resolve_error(error: ScaffoldError) -> String {
+    match error {
+        ScaffoldError::Manifest(detail) => format!(
+            "This template needs a newer version of Forge Super than this one, or it is damaged \
+             ({detail}). Check for template updates, or update Forge Super."
+        ),
+        other => other.to_string(),
+    }
+}
+
 /// A post step in words. The engine only describes these; the panel never runs
 /// them itself (an install goes through the Script Runner, behind the trust gate).
 fn describe_post(step: &PostStepDescriptor, target: &Path) -> String {
@@ -559,8 +572,14 @@ impl NewProjectView {
                 }
                 match result {
                     Ok(()) => {
+                        // What was downloaded is the index's revision: no update is
+                        // pending for it any more.
                         for known in this.versions.iter_mut().filter(|v| v.version == version) {
                             known.installed = true;
+                            known.update_available = false;
+                            if known.available_revision.is_some() {
+                                known.installed_revision = known.available_revision;
+                            }
                         }
                         this.load_template(version, window, cx);
                     }
@@ -586,7 +605,7 @@ impl NewProjectView {
                     let store = TemplateStore::open(templates_dir()).map_err(|e| e.to_string())?;
                     let template = store
                         .resolve(&generator, &version)
-                        .map_err(|e| e.to_string())?;
+                        .map_err(describe_resolve_error)?;
                     Ok::<_, String>((template.manifest, template.dir))
                 })
                 .await;
@@ -1215,6 +1234,7 @@ impl NewProjectView {
         let page = match self.step {
             Step::Options => v_flex()
                 .gap_3()
+                .children(self.render_template_notices(cx))
                 .children(self.render_node_notice(muted))
                 .child(self.render_form(cx))
                 .into_any_element(),
@@ -1223,6 +1243,72 @@ impl NewProjectView {
             Step::Create => self.render_create_page(muted, cx),
         };
         v_flex().gap_4().child(stepper).child(page).into_any_element()
+    }
+
+    /// What to know about this template before using it: that it is a legacy one,
+    /// and that a newer revision of it is available.
+    fn render_template_notices(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let mut notices = Vec::new();
+        if self.generator == crate::LEGACY_SPFX_GENERATOR {
+            notices.push(
+                v_flex()
+                    .gap_1()
+                    .child(Alert::warning(
+                        "scaffold-legacy",
+                        "Legacy template. It was built from the output of Microsoft's yo \
+                         generator and then edited. Whether such output may be redistributed \
+                         has not been confirmed by Microsoft, and this project is not \
+                         affiliated with or endorsed by Microsoft.",
+                    ))
+                    .child(
+                        h_flex().child(
+                            Button::new("scaffold-legacy-notice")
+                                .ghost()
+                                .small()
+                                .label("Read the notice")
+                                .on_click(|_, _, cx| {
+                                    cx.open_url(
+                                        "https://github.com/mentenaz/Forge.Scaffold.Templates#readme",
+                                    );
+                                }),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        // Only a downloaded template can be updated: a folder of the user's own
+        // is never replaced.
+        let update = self
+            .versions
+            .iter()
+            .find(|known| Some(&known.version) == self.chosen.as_ref())
+            .filter(|known| known.installed && !known.local && known.update_available);
+        if let Some(known) = update {
+            let message = match (known.installed_revision, known.available_revision) {
+                (Some(from), Some(to)) => format!(
+                    "A newer revision of this template is available (revision {from} to {to})."
+                ),
+                _ => "A newer revision of this template is available.".to_string(),
+            };
+            notices.push(
+                v_flex()
+                    .gap_1()
+                    .child(Alert::info("scaffold-update", message))
+                    .child(
+                        h_flex().child(
+                            Button::new("scaffold-update-template")
+                                .outline()
+                                .small()
+                                .label("Update this template")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.download(window, cx)
+                                })),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        notices
     }
 
     /// The Location page: where the project goes, and whether that works.

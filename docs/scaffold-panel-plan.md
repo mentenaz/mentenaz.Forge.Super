@@ -1,9 +1,27 @@
 # Scaffold panel: plan
 
-Status: **plan only, nothing built.** Written 22 November 2026 from reading the engine (`E:\mentenaz\Forge.Scaffold.SDK`:
-`Overview.md`, `docs/integration-notes.md`, `docs/roadmap.md`, and the public API in `src/lib.rs`, `src/plan.rs`,
-`src/fetch.rs`, `src/store.rs`, `src/manifest.rs`) and the templates repo (`E:\mentenaz\Forge.Scaffold.Templates`).
-Things not read or not checked are in "Not verified" at the end, not hidden.
+Status: **phases 1 to 5 are built and merged, and phase 6 is mostly done** (see "Where it stands" just below). The plan
+below was written on 22 November 2026 from reading the engine (`E:\mentenaz\Forge.Scaffold.SDK`: `Overview.md`,
+`docs/integration-notes.md`, `docs/roadmap.md`, and the public API in `src/lib.rs`, `src/plan.rs`, `src/fetch.rs`,
+`src/store.rs`, `src/manifest.rs`) and the templates repo (`E:\mentenaz\Forge.Scaffold.Templates`), and is kept as it was
+written. Things not read or not checked are in "Not verified" at the end, not hidden.
+
+## Where it stands (23 November 2026)
+
+| Phase | State |
+|---|---|
+| 1 panel, `Fetch`, generator list | Done |
+| 2 the form from the manifest | Done. List fields are rows with a [-] and a [+] each, and every field is validated as you type, by the engine's own rules (solution name, package name, web part names, duplicates ignoring case). "Next" waits while a field is wrong |
+| 3 review: file tree, warnings | Done |
+| 4 location and create | Done: folder picker (remembers the last one), plan at the real location, progress bar, the engine removes a half-written folder, "Open project" in a new window |
+| 5 install behind the gate | Done, as the existing install offer in `npm_bootstrap`: not made until the gate allows the folder, runs in the Script Runner (which asks the gate), a spinner toast, and an automatic start when "Run install afterwards" is on. Found on the way: that offer used to run `npm install` with no trust check |
+| 6 index-driven list | Mostly done. Search, tag filter and tabs (All, Installed, Local); "Update available" on a row and an "Update this template" button in the form; source labels (Microsoft SPFx, create-vite, Forge) and a **Legacy** tag with a notice in the form; a clear message when a template needs a newer Forge Super. **Open:** auto-update (decided: off, manual only for now) and a `source` field in the index so the labels are read, not inferred |
+| 7 existing solution: info, add, edit, undo | Not started. Idea so far: a gear in the Node panel's SPFx section opens a short form (name, description, version, which is all the engine lets you edit) in a tab, with a preview of the changes before applying and an undo afterwards; "add a component" is a separate action |
+| 8 analysis review | Blocked on the analysis engine |
+| 9 more generators, "save as template" | The full-stack, node API and Vite generators are in the list but have **not been tried in the panel**; "save as template" is not started |
+
+Not in the plan, built along the way: the search box and tag filter, the tabs, and remembering the chosen tag, tab and
+last location in the Forge database.
 
 ## What this is
 
@@ -136,6 +154,11 @@ user has looked at it.
    keeps its own); the engine's `FORGE_TEMPLATES` variable still overrides it. A setting for the location is deferred.
    Auto-update is still open.
 6. **Panel name and icon** (an SVG to add).
+
+*Answers so far:* (1) done, the index is schema 2 with titles and tags, and a `source` field is still wanted; (2) a dock
+list plus a workspace tab, as built; (3) both SPFx and Vite are in the list; (4) legacy versions stay visible, labelled
+Legacy, with the notice; (5) the location is decided (above) and auto-update is **off** for now; (6) still the placeholder
+box icon, no keybinding yet.
 
 ## Not verified
 
