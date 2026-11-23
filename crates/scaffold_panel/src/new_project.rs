@@ -12,28 +12,34 @@
 //! runs in `cx.background_spawn`. A result that arrives after the user has
 //! picked another version is dropped (`generation`).
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use forge_scaffold::{
-    Answers, DirSource, Manifest, NodeCheck, PlanOptions, Prompt, PromptKind, ScaffoldError,
-    TemplateStore, VersionInfo, plan,
+    Answers, DirSource, Manifest, NodeCheck, PlanOptions, PostAction, PostStepDescriptor, Prompt,
+    PromptKind, ScaffoldError, TemplateStore, VersionInfo, plan,
 };
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, IndexPath, Sizable as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Selectable as _, Sizable as _,
+    StyledExt as _,
     alert::Alert,
     button::{Button, ButtonVariants as _},
     form::{field, v_form},
     h_flex,
     input::{Input, InputState},
+    list::ListItem,
     select::{Select, SelectEvent, SelectState},
     spinner::Spinner,
+    stepper::{Stepper, StepperItem},
     switch::Switch,
+    tree::{TreeItem, TreeState, tree},
     v_flex,
 };
 use http_client::HttpClient;
@@ -86,14 +92,26 @@ enum NodeNotice {
 enum Check {
     Idle,
     Running,
+    /// The plan: what would be written, and what would be offered afterwards.
     Valid {
         folder: String,
-        files: usize,
+        /// Every path that would be written, relative to the new folder.
+        files: Vec<String>,
+        bytes: u64,
         warnings: Vec<String>,
+        /// What the host would run afterwards, in words.
+        post: Vec<String>,
     },
     /// One message per field, in the engine's words.
     Issues(Vec<(String, String)>),
     Failed(String),
+}
+
+/// The wizard's pages. Location and Create come in the next phase.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Options,
+    Review,
 }
 
 pub struct NewProjectView {
@@ -108,6 +126,9 @@ pub struct NewProjectView {
     loaded: Option<Loaded>,
     node: NodeNotice,
     check: Check,
+    step: Step,
+    /// The review's file tree, made on the main thread from `Check::Valid`.
+    review_tree: Option<Entity<TreeState>>,
     /// Bumped whenever another version is chosen, so a slow answer for the
     /// old one is ignored.
     generation: u64,
@@ -152,17 +173,85 @@ fn node_notice(manifest: &Manifest) -> NodeNotice {
     }
 }
 
+/// A post step in words. The engine only describes these; the panel never runs
+/// them itself (an install goes through the Script Runner, behind the trust gate).
+fn describe_post(step: &PostStepDescriptor, target: &Path) -> String {
+    let place = match step.cwd.strip_prefix(target) {
+        Ok(inside) if inside.as_os_str().is_empty() => "the new folder".to_string(),
+        Ok(inside) => format!("{} in the new folder", inside.display()),
+        Err(_) => step.cwd.display().to_string(),
+    };
+    match step.action {
+        PostAction::Install => {
+            let manager = step
+                .package_manager
+                .map(|manager| format!(" with {}", format!("{manager:?}").to_lowercase()))
+                .unwrap_or_default();
+            format!("Install the dependencies{manager}, in {place}")
+        }
+        PostAction::ComposeUp => format!("Start the containers (docker compose up -d), in {place}"),
+        _ => format!("{:?}, in {place}", step.action),
+    }
+}
+
+/// The planned paths as a folder tree: folders first, then files, each sorted.
+/// The top two levels start open.
+fn tree_items(paths: &[String]) -> Vec<TreeItem> {
+    #[derive(Default)]
+    struct Node {
+        children: BTreeMap<String, Node>,
+    }
+
+    let mut root = Node::default();
+    for path in paths {
+        let mut node = &mut root;
+        for part in path.split('/').filter(|part| !part.is_empty()) {
+            node = node.children.entry(part.to_string()).or_default();
+        }
+    }
+
+    fn convert(prefix: &str, node: &Node, depth: usize) -> Vec<TreeItem> {
+        let mut entries: Vec<(&String, &Node)> = node.children.iter().collect();
+        // Folders (nodes with children) before files.
+        entries.sort_by_key(|(name, child)| (child.children.is_empty(), name.to_lowercase()));
+        entries
+            .into_iter()
+            .map(|(name, child)| {
+                let id = format!("{prefix}{name}");
+                let item = TreeItem::new(id.clone(), name.clone());
+                if child.children.is_empty() {
+                    item
+                } else {
+                    item.children(convert(&format!("{id}/"), child, depth + 1))
+                        .expanded(depth < 2)
+                }
+            })
+            .collect()
+    }
+    convert("", &root, 0)
+}
+
 /// The engine's verdict on `answers`: `plan()` into a scratch location, which
 /// writes nothing. Blocks on the disk: runs off the main thread.
 fn run_plan(manifest: &Manifest, dir: &PathBuf, answers: &Answers) -> Check {
     let location = std::env::temp_dir();
     let source = DirSource::new(dir);
     match plan(manifest, &source, answers, PlanOptions::new(&location)) {
-        Ok(planned) => Check::Valid {
-            folder: planned.folder_name.clone(),
-            files: planned.files.len(),
-            warnings: planned.warnings.iter().map(|w| w.to_string()).collect(),
-        },
+        Ok(planned) => {
+            let mut files: Vec<String> = planned.files.paths().map(str::to_string).collect();
+            files.sort();
+            Check::Valid {
+                folder: planned.folder_name.clone(),
+                files,
+                bytes: planned.files.total_bytes(),
+                warnings: planned.warnings.iter().map(|w| w.to_string()).collect(),
+                post: planned
+                    .post
+                    .iter()
+                    .map(|step| describe_post(step, &planned.target))
+                    .collect(),
+            }
+        }
         Err(ScaffoldError::Validation(issues)) => Check::Issues(
             issues
                 .into_iter()
@@ -204,6 +293,8 @@ impl NewProjectView {
             loaded: None,
             node: NodeNotice::Idle,
             check: Check::Idle,
+            step: Step::Options,
+            review_tree: None,
             generation: 0,
             _subscriptions: vec![subscription],
         };
@@ -267,6 +358,8 @@ impl NewProjectView {
         self.loaded = None;
         self.node = NodeNotice::Idle;
         self.check = Check::Idle;
+        self.review_tree = None;
+        self.step = Step::Options;
         let installed = self
             .versions
             .iter()
@@ -512,6 +605,7 @@ impl NewProjectView {
         let (manifest, dir) = (loaded.manifest.clone(), loaded.dir.clone());
         let answers = self.collect_answers(cx);
         self.check = Check::Running;
+        self.review_tree = None;
         cx.notify();
         let generation = self.generation;
         cx.spawn(async move |this, cx| {
@@ -520,6 +614,20 @@ impl NewProjectView {
                 .await;
             this.update(cx, |this, cx| {
                 if this.generation == generation {
+                    // The tree is an entity, so it is made here, not on the
+                    // background thread that planned.
+                    this.review_tree = match &verdict {
+                        Check::Valid { files, .. } => {
+                            let items = tree_items(files);
+                            Some(cx.new(|cx| TreeState::new(cx).items(items)))
+                        }
+                        _ => None,
+                    };
+                    // Valid answers move on to the review; anything else stays
+                    // on the options, with the messages under the fields.
+                    if matches!(verdict, Check::Valid { .. }) {
+                        this.step = Step::Review;
+                    }
                     this.check = verdict;
                     cx.notify();
                 }
@@ -578,6 +686,162 @@ impl NewProjectView {
                 .into_any_element(),
             ),
         }
+    }
+
+    /// The wizard: a stepper over the page for the current step.
+    fn render_wizard(&self, muted: gpui::Hsla, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let on_review = self.step == Step::Review;
+        // The Review step is only reached with "Next", which plans again, so a
+        // review never shows answers that have since been edited. The Options
+        // step can be clicked to go back.
+        let stepper = Stepper::new("scaffold-steps")
+            .selected_index(usize::from(on_review))
+            .items([
+                StepperItem::new().child("Options"),
+                StepperItem::new().disabled(!on_review).child("Review"),
+            ])
+            .on_click(cx.listener(|this, index: &usize, _, cx| {
+                if *index == 0 {
+                    this.step = Step::Options;
+                    cx.notify();
+                }
+            }));
+        let page = if on_review {
+            self.render_review_page(cx)
+        } else {
+            v_flex()
+                .gap_3()
+                .children(self.render_node_notice(muted))
+                .child(self.render_form(cx))
+                .into_any_element()
+        };
+        v_flex().gap_4().child(stepper).child(page).into_any_element()
+    }
+
+    /// The Review page: the review, and a way back to the options.
+    fn render_review_page(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Check::Valid {
+            folder,
+            files,
+            bytes,
+            warnings,
+            post,
+        } = &self.check
+        else {
+            return div().into_any_element();
+        };
+        v_flex()
+            .gap_3()
+            .child(self.render_review(folder, files, *bytes, warnings, post, cx))
+            .child(
+                h_flex().gap_2().child(
+                    Button::new("scaffold-back")
+                        .outline()
+                        .label("Back")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.step = Step::Options;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .into_any_element()
+    }
+
+    /// The review: what would be created, the warnings, and what would be
+    /// offered afterwards. Shown before anything is written.
+    fn render_review(
+        &self,
+        folder: &str,
+        files: &[String],
+        bytes: u64,
+        warnings: &[String],
+        post: &[String],
+        cx: &App,
+    ) -> gpui::AnyElement {
+        let theme = cx.theme();
+        let (muted, border) = (theme.muted_foreground, theme.border);
+        let size = if bytes >= 1024 * 1024 {
+            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        } else {
+            format!("{:.1} KB", bytes as f64 / 1024.0)
+        };
+
+        // The tree is a virtual list, so it needs a height of its own.
+        let tree_view = match &self.review_tree {
+            Some(state) => div()
+                .h(px(320.))
+                .border_1()
+                .border_color(border)
+                .rounded_md()
+                .child(tree(state, |ix, entry, selected, _window, cx| {
+                    let theme = cx.theme();
+                    let is_folder = entry.is_folder();
+                    let colour = if is_folder {
+                        theme.foreground
+                    } else {
+                        theme.muted_foreground
+                    };
+                    ListItem::new(ix)
+                        .selected(selected)
+                        .px(px(12.0 * entry.depth() as f32 + 8.0))
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .items_center()
+                                .when(is_folder, |row| row.child(Icon::new(IconName::Folder).small()))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(colour)
+                                        .child(entry.item().label.clone()),
+                                ),
+                        )
+                }))
+                .into_any_element(),
+            None => div().into_any_element(),
+        };
+
+        v_flex()
+            .gap_3()
+            .child(Alert::success(
+                "scaffold-valid",
+                format!(
+                    "These answers are valid. It would create \"{folder}\": {} files, {size}.",
+                    files.len()
+                ),
+            ))
+            .children(warnings.iter().enumerate().map(|(index, warning)| {
+                Alert::warning(("scaffold-warning", index), warning.clone())
+            }))
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_sm().font_semibold().child("Files"))
+                    .child(tree_view),
+            )
+            .when(!post.is_empty(), |column| {
+                column.child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_sm().font_semibold().child("Afterwards"))
+                        .children(post.iter().map(|step| {
+                            div().text_xs().text_color(muted).child(format!("• {step}"))
+                        }))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .child("Nothing runs on its own: you decide when."),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("Choosing where to create it, and creating it, comes next."),
+            )
+            .into_any_element()
     }
 
     fn render_form(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -647,26 +911,8 @@ impl NewProjectView {
         let running = matches!(self.check, Check::Running);
         let result = match &self.check {
             Check::Idle | Check::Running => None,
-            Check::Valid {
-                folder,
-                files,
-                warnings,
-            } => Some(
-                v_flex()
-                    .gap_2()
-                    .child(Alert::success(
-                        "scaffold-valid",
-                        format!(
-                            "These answers are valid. It would create \"{folder}\" with \
-                             {files} files. Reviewing the files and choosing where to create \
-                             them comes next."
-                        ),
-                    ))
-                    .children(warnings.iter().enumerate().map(|(index, warning)| {
-                        Alert::warning(("scaffold-warning", index), warning.clone())
-                    }))
-                    .into_any_element(),
-            ),
+            // Valid answers are shown on the Review page, not under the form.
+            Check::Valid { .. } => None,
             Check::Issues(_) => Some(
                 Alert::error(
                     "scaffold-issues",
@@ -695,7 +941,7 @@ impl NewProjectView {
                         .label(if running {
                             "Checking…"
                         } else {
-                            "Check answers"
+                            "Next: review"
                         })
                         .disabled(running)
                         .on_click(cx.listener(|this, _, _, cx| this.check_answers(cx))),
@@ -752,11 +998,7 @@ impl Render for NewProjectView {
                     ),
                 )
                 .into_any_element(),
-            Status::Ready => v_flex()
-                .gap_3()
-                .children(self.render_node_notice(muted))
-                .child(self.render_form(cx))
-                .into_any_element(),
+            Status::Ready => self.render_wizard(muted, cx),
         };
 
         // Every root fills its area, loading and error states included.
@@ -772,6 +1014,10 @@ impl Render for NewProjectView {
                 // tab is narrower.
                 v_flex()
                     .w_full()
+                    // Keeps its own height: without this the column shrinks to
+                    // fit the tab and the content spills out instead of the
+                    // tab scrolling.
+                    .flex_shrink_0()
                     .gap_3()
                     .p_4()
                     .max_w(px(640.))
