@@ -155,6 +155,71 @@ fn url_ranges(line: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// Whether `command` is a plain install of packages, whose output is a long
+/// list of registry addresses and nothing worth clicking: `npm install`, `yarn
+/// add react`, `pip install -r requirements.txt`, `dotnet restore`, `cargo
+/// install ripgrep` and the like. Their output is shown as plain text, with no
+/// links bar and no clickable addresses (see `ScriptRunnerPanel::links_enabled`).
+///
+/// A command with several parts (`npm install && npm run dev`) is not one: the
+/// part that follows may print an address worth having, like a dev server's.
+fn is_install_command(command: &str) -> bool {
+    if command.contains("&&") || command.contains("||") || command.contains([';', '|']) {
+        return false;
+    }
+    let words: Vec<String> = command
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect();
+    let Some(program) = words.first() else {
+        return false;
+    };
+    // `C:\tools\npm.cmd` is npm.
+    let program = program
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(program)
+        .trim_end_matches(".cmd")
+        .trim_end_matches(".exe")
+        .trim_end_matches(".bat");
+    let (program, rest) = match program {
+        // `python -m pip install x` is pip.
+        "python" | "python3" | "py" if words.get(1).map(String::as_str) == Some("-m") => {
+            match words.get(2).map(String::as_str) {
+                Some(module) => (module, words.get(3..).unwrap_or(&[])),
+                None => return false,
+            }
+        }
+        _ => (program, words.get(1..).unwrap_or(&[])),
+    };
+    // Options before the sub-command (`npm --silent install`) are skipped.
+    let subcommand = rest
+        .iter()
+        .map(String::as_str)
+        .find(|word| !word.starts_with('-'));
+    match program {
+        // A bare `yarn` installs.
+        "yarn" if rest.is_empty() => true,
+        "npm" | "pnpm" | "yarn" | "bun" => matches!(
+            subcommand,
+            Some(
+                "install" | "i" | "ci" | "add" | "update" | "upgrade" | "remove" | "uninstall"
+                    | "rm"
+            )
+        ),
+        "pip" | "pip3" | "pipx" => {
+            matches!(subcommand, Some("install" | "uninstall" | "download"))
+        }
+        "poetry" | "uv" => matches!(subcommand, Some("install" | "add" | "sync" | "remove")),
+        "dotnet" => matches!(subcommand, Some("restore"))
+            || (subcommand == Some("add") && rest.iter().any(|word| word == "package")),
+        "cargo" => matches!(subcommand, Some("install" | "fetch" | "add" | "update")),
+        "composer" => matches!(subcommand, Some("install" | "update" | "require")),
+        "gem" | "nuget" => matches!(subcommand, Some("install" | "restore")),
+        _ => false,
+    }
+}
+
 /// Extracts every distinct `http(s)://` URL in `line` (already
 /// ANSI-stripped), in order of first appearance.
 fn find_urls(line: &str) -> Vec<String> {
@@ -168,9 +233,15 @@ fn find_urls(line: &str) -> Vec<String> {
 /// substring (if any) into a clickable link that opens in the system
 /// browser — e.g. the dev-server URL a tool like Vite prints on startup.
 /// Every detected link in a run also shows up in the links bar above the
-/// output (see `render`), with its own copy button.
-fn render_output_line(line: &str, muted: Hsla, link: Hsla) -> AnyElement {
-    let Some(&(start, end)) = url_ranges(line).first() else {
+/// output (see `render`), with its own copy button. With `links` off (an
+/// install, see `is_install_command`) the line is plain text.
+fn render_output_line(line: &str, muted: Hsla, link: Hsla, links: bool) -> AnyElement {
+    let first_url = if links {
+        url_ranges(line).first().copied()
+    } else {
+        None
+    };
+    let Some((start, end)) = first_url else {
         return div()
             .font_family("Cascadia Mono")
             .text_xs()
@@ -285,6 +356,10 @@ pub struct ScriptRunnerPanel {
     /// first-seen order. Rendered as a "links" bar above the output when
     /// there's no SPFx debug script to show instead (see `render`).
     detected_links: Vec<String>,
+    /// Whether this run's addresses are collected into the links bar and shown as
+    /// links in the output. Off for a package install, which prints hundreds of
+    /// registry addresses (see `is_install_command`).
+    links_enabled: bool,
     /// The link (if any) currently showing "copied" in the links bar —
     /// same ~1.6 s revert pattern as `debug_copied`, keyed by URL since
     /// multiple links can be detected in one run.
@@ -338,9 +413,11 @@ impl ScriptRunnerPanel {
                                         if let Some(qs) = debug_querystring_in(&line) {
                                             panel.debug_script = Some(qs);
                                         }
-                                        for url in find_urls(&line) {
-                                            if !panel.detected_links.contains(&url) {
-                                                panel.detected_links.push(url);
+                                        if panel.links_enabled {
+                                            for url in find_urls(&line) {
+                                                if !panel.detected_links.contains(&url) {
+                                                    panel.detected_links.push(url);
+                                                }
                                             }
                                         }
                                         panel.output.push(line);
@@ -389,6 +466,7 @@ impl ScriptRunnerPanel {
                 debug_script: None,
                 debug_copied: false,
                 detected_links: Vec::new(),
+                links_enabled: true,
                 link_copied: None,
             }
         })
@@ -464,6 +542,7 @@ impl ScriptRunnerPanel {
         self.debug_script = None;
         self.debug_copied = false;
         self.detected_links.clear();
+        self.links_enabled = !is_install_command(&cmd);
         self.link_copied = None;
         self.running = true;
         self.last_exit = None;
@@ -1162,7 +1241,12 @@ impl Render for ScriptRunnerPanel {
             .py_1()
             .children(
                 self.output.iter().rev().take(200).rev().map(|line| {
-                    render_output_line(line, cx.theme().muted_foreground, cx.theme().link)
+                    render_output_line(
+                        line,
+                        cx.theme().muted_foreground,
+                        cx.theme().link,
+                        self.links_enabled,
+                    )
                 }),
             );
 
@@ -1188,6 +1272,63 @@ impl Render for ScriptRunnerPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_installs_are_recognised() {
+        for command in [
+            "npm install",
+            "npm i",
+            "npm ci",
+            "npm install --loglevel=http",
+            "npm --silent install react",
+            "npm.cmd install",
+            "C:\\tools\\npm.cmd ci",
+            "NPM INSTALL",
+            "yarn",
+            "yarn add react",
+            "pnpm install",
+            "bun add left-pad",
+            "pip install -r requirements.txt",
+            "pip3 install flask",
+            "python -m pip install flask",
+            "py -m pip install --upgrade pip",
+            "poetry install",
+            "uv sync",
+            "dotnet restore",
+            "dotnet add package Newtonsoft.Json",
+            "cargo install ripgrep",
+            "cargo fetch",
+            "composer install",
+        ] {
+            assert!(is_install_command(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn other_commands_keep_their_links() {
+        for command in [
+            "",
+            "npm run dev",
+            "npm start",
+            "npm test",
+            "yarn dev",
+            "node server.js",
+            "vite",
+            "cargo build",
+            "cargo run",
+            "dotnet run",
+            "dotnet build",
+            "pip --version",
+            "python app.py",
+            "python -m http.server",
+            // A dev server may follow the install and print an address worth having.
+            "npm install && npm run dev",
+            "npm install; npm start",
+            "npm ci | tee install.log",
+        ] {
+            assert!(!is_install_command(command), "{command}");
+        }
+    }
 
     #[test]
     fn debug_querystring_is_cut_at_whitespace_and_quotes() {
