@@ -125,7 +125,10 @@ pub fn init(cx: &mut App) {
         // The Node panel's gear on an SPFx solution.
         workspace.register_action(|workspace, action: &zed_actions::scaffold::EditSolution, window, cx| {
             let root = action.path.clone();
-            let view = cx.new(|cx| EditSolutionView::new(root, window, cx));
+            let weak_workspace = workspace.weak_handle();
+            let http = cx.http_client();
+            let view =
+                cx.new(|cx| EditSolutionView::new(root, weak_workspace, http, window, cx));
             workspace.add_item_to_active_pane(Box::new(view), None, true, window, cx);
         });
     })
