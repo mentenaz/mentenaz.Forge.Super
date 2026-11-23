@@ -1,6 +1,6 @@
 # Scaffold panel: plan
 
-Status: **phases 1 to 5 are built and merged, and phase 6 is mostly done** (see "Where it stands" just below). The plan
+Status: **phases 1 to 7 are built and merged, and phase 6 is mostly done** (see "Where it stands" just below). The plan
 below was written on 22 November 2026 from reading the engine (`E:\mentenaz\Forge.Scaffold.SDK`: `Overview.md`,
 `docs/integration-notes.md`, `docs/roadmap.md`, and the public API in `src/lib.rs`, `src/plan.rs`, `src/fetch.rs`,
 `src/store.rs`, `src/manifest.rs`) and the templates repo (`E:\mentenaz\Forge.Scaffold.Templates`), and is kept as it was
@@ -16,7 +16,7 @@ written. Things not read or not checked are in "Not verified" at the end, not hi
 | 4 location and create | Done: folder picker (remembers the last one), plan at the real location, progress bar, the engine removes a half-written folder, "Open project" in a new window |
 | 5 install behind the gate | Done, as the existing install offer in `npm_bootstrap`: not made until the gate allows the folder, runs in the Script Runner (which asks the gate), a spinner toast, and an automatic start when "Run install afterwards" is on. Found on the way: that offer used to run `npm install` with no trust check |
 | 6 index-driven list | Mostly done. Search, tag filter and tabs (All, Installed, Local); "Update available" on a row and an "Update this template" button in the form; source labels (Microsoft SPFx, create-vite, Forge) and a **Legacy** tag with a notice in the form; a clear message when a template needs a newer Forge Super. **Open:** auto-update (decided: off, manual only for now) and a `source` field in the index so the labels are read, not inferred |
-| 7 existing solution: info, add, edit, undo | Not started. Idea so far: a gear in the Node panel's SPFx section opens a short form (name, description, version, which is all the engine lets you edit) in a tab, with a preview of the changes before applying and an undo afterwards; "add a component" is a separate action |
+| 7 existing solution: info, add, edit, undo | Done, except removing. A gear on the Node panel's SPFx row opens a tab with two pages. **Details:** name, description and version (all the engine lets you edit), checked as you type by the engine's rules, with a before-and-after preview and Undo. **Components:** what is in the solution, and adding web parts: the template is chosen by the solution's SPFx minor version (`spfx-webpart` for 1.20 to 1.23, `webpart-react`, `-minimal` and `-noframework` for 1.24), names are rows as in the new-project form, the engine's plan is shown (new and changed files, what is left alone, warnings), with Undo and an Open web part button. A different framework from the solution's is a note, not a block. The official 1.24 templates add one component at a time. Each web part's GUID is made by the engine. **Open:** removing a component (the engine never deletes, so it would be an engine change), extensions, Adaptive Cards and libraries, an npm install button after an add (today it is a line of text), and trying the official 1.24 templates against a real 1.24 solution |
 | 8 analysis review | Blocked on the analysis engine |
 | 9 more generators, "save as template" | The full-stack, node API and Vite generators are in the list but have **not been tried in the panel**; "save as template" is not started |
 

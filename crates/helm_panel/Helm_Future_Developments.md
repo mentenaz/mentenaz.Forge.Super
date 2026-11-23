@@ -1,5 +1,24 @@
 # Mentenaz Forge — Helm Platform, Workspace & Phased Delivery Roadmap
 
+## Status: what has been built since this was written (23 November 2026)
+
+This document is a roadmap and is kept as written. These parts of it, or things next to it, now exist:
+
+- **Publish to GitHub, from the Git panel.** A folder with no remote now has a **Publish** button that opens a Helm dialog: choose
+  an account, then either **Connect** an existing repository or **Create new repo** (name, visibility). It never force-pushes, so an
+  existing repository is not overwritten, and the README toggles are hidden on purpose. The Git panel's empty state was redesigned
+  around it.
+- **A repository picker** (`RepoPicker`) in that dialog: the account's repositories, 8 per page, with a tick to choose.
+- **Helm's `git` is behind the trust gate.** Helm runs `git` in the project only once the folder is trusted, and always with
+  `-c core.fsmonitor=false`, because a repository's own config can name a program to run. Restricted Mode shows a banner in Helm
+  instead. (`docs/trust-gate-canary-test.md` has the check for it.)
+- **Theme sync** of the component buttons: hover and foreground colours follow the active theme (the mapping is in `crates/zed/src/main.rs`).
+
+Not built: **cloning from the picker** (the same list with a Clone button, as proposed in the discussion that led to the picker),
+and an **Add remote URL** fallback for a remote that is not on GitHub.
+
+---
+
 ## 1. Overview
 
 **Mentenaz Forge** is positioned as a developer OS / developer cockpit: an environment where developers can write code, manage projects, run development workflows, interact with automation, and coordinate AI-assisted development.

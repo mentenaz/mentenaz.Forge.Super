@@ -177,6 +177,40 @@ The compiler also leaves a `python.pdb` next to it. It is harmless.
 targets, so **the scan itself creates this marker**, with no click, as soon as
 the project is trusted.
 
+### 5. npm install offer: the same `package.json`, no extra setup
+
+The `npm-preinstall.marker` of case 2 also tests the **install offer**
+(`npm_bootstrap`), which is not a panel scan: when a folder with a `package.json`
+is opened and trusted, a toast offers `npm install`, and the Scaffold panel can
+start it by itself when "Run install afterwards" is on. It runs in the Script
+Runner, which asks the gate, and the offer itself asks the gate before it shows.
+The log lines start with `npm_bootstrap:`.
+
+**When it fires.** Never while the folder is untrusted (no toast, no install).
+After Trust and Continue the toast appears on its own, and the marker appears only
+once the install is started, by clicking the toast's button or by "Run install
+afterwards".
+
+### 6. git: a repository config that runs a program (not yet run)
+
+*Added 23 November 2026 after the audit found Helm's `git` ungated. The steps below
+have not been run end to end; treat the first run as part of the test.*
+
+Git can run a program named in a repository's own config on a plain `git status`:
+`core.fsmonitor`. Helm runs `git` in the project, so it must neither run `git` in
+an untrusted folder nor let that setting fire in a trusted one.
+
+In the canary project (`git init` it), set a local config whose `fsmonitor` command
+creates `E:\canary-test\markers\git-fsmonitor.marker` and does nothing else (the
+exact quoting depends on the shell Git for Windows uses; confirm with a manual
+`git status` in a scratch repo first, and check the marker appears there, so you
+know the canary can fire).
+
+**Expected.** Untrusted: no Helm `git` call at all (the gate log has `BLOCKED`
+lines asked by Helm's `run_git`), and the marker is absent. Trusted: Helm's
+`git` calls are `ALLOWED`, and the marker is **still absent**, because Helm passes
+`-c core.fsmonitor=false`.
+
 ## The test
 
 ### Phase A: untrusted
@@ -194,6 +228,10 @@ the project is trusted.
      `ALLOWED` line for that folder.
 5. Also try, from the npm manager and Cargo manager tabs, to open and refresh.
    They show the "not trusted yet" message. Still no marker.
+6. **No install toast** appears for the `package.json`, and the log has no
+   `npm_bootstrap:` line saying it started an install.
+7. Helm shows its **Restricted Mode banner** and runs no `git`; the Git panel's
+   own (upstream) behaviour is not Helm's.
 
 ### Phase B: trusted
 
@@ -209,6 +247,10 @@ the project is trusted.
    appears, and Cargo reports the wrapper's error.
 4. In the Node panel click **Install** (or update). **Expected:**
    `npm-preinstall.marker` appears. It did not appear from scanning alone.
+5. **The install offer:** after trusting, the install toast appears by itself.
+   **Expected:** `npm-preinstall.marker` is still absent until you start the
+   install from the toast. (Delete the marker between steps 4 and 5 to see this.)
+6. **Helm and `git`:** `git-fsmonitor.marker` does not appear, trusted or not.
 
 ### Result
 
@@ -218,6 +260,8 @@ the project is trusted.
 | After Trust and Continue, no click | `python-stub`, `dotnet-msbuild` | they appear on their own |
 | After clicking Check | `cargo-wrapper` | it appears only now |
 | After clicking Install | `npm-preinstall` | it appears only now |
+| Trusted, install toast shown, not clicked | none new | no marker until the install starts |
+| Helm open, untrusted or trusted | `git-fsmonitor` | it never appears |
 
 If **any marker appears while the project is untrusted, the gate has failed.**
 Keep the markers, note the order they appeared in, and attach the gate log and the
@@ -231,6 +275,11 @@ watcher log (`E:\canary-test\process-log.txt`).
 - **The .NET scan does run MSBuild targets.** `dotnet list package` evaluates and
   builds the project, so a build file in an untrusted project can run a program
   during a scan. That is why the .NET panel is gated.
+- **The first audit missed two callers.** It covered the panels' backends, and
+  afterwards two places that start a program were found outside them: the npm
+  install offer (`npm_bootstrap`) ran `npm install` in a folder that was not
+  trusted, and Helm's `git` had no check. Both now ask the gate; cases 5 and 6 are
+  there so a new caller of either kind is caught by this test.
 - **The process watcher can miss very short processes.** It polls rather than
   listens, so it is a hint, not proof. The markers and the gate log are the
   evidence.
