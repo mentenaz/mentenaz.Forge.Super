@@ -6,8 +6,9 @@ name: build_installers
 #    build, one architecture shared across all of them, and whether to
 #    publish. Good for testing one platform at a time.
 # 2. Automatic: push a tag matching "dev-v*" (e.g. `git tag dev-v1 && git
-#    push origin dev-v1`). Builds all three platforms for x86_64 and always
-#    publishes, under that exact tag name instead of the rolling
+#    push origin dev-v1`). Builds Windows and Linux for x86_64 and macOS for
+#    Apple Silicon only (see below), and always publishes,
+#    under that exact tag name instead of the rolling
 #    "dev-build" the manual path uses — so each tagged run gets its own
 #    permanent Release page rather than overwriting the last one.
 #
@@ -115,12 +116,15 @@ jobs:
             echo "build_windows=true" >> "$GITHUB_OUTPUT"
             echo "build_linux=true" >> "$GITHUB_OUTPUT"
             # macOS builds on macos-26 with Xcode 26, where webrtc-sys compiles
-            # (it did not on macos-14's Xcode 15). Both Apple Silicon and Intel
-            # are built, since most Macs are Apple Silicon; the Windows and Linux
-            # builds are x86_64 only.
+            # (it did not on macos-14's Xcode 15). A tag builds Apple Silicon
+            # only. The Intel build was cancelled after about three hours on the
+            # bundle step on dev-v62 and dev-v63, and Intel Macs are a shrinking
+            # group (macOS 26 is the last release for them). It is not removed:
+            # a manual run with architecture x86_64 still builds it. The Windows
+            # and Linux builds are x86_64 only.
             echo "build_macos=true" >> "$GITHUB_OUTPUT"
             echo "macos_check_only=false" >> "$GITHUB_OUTPUT"
-            echo 'macos_archs=["aarch64","x86_64"]' >> "$GITHUB_OUTPUT"
+            echo 'macos_archs=["aarch64"]' >> "$GITHUB_OUTPUT"
             echo "publish_release=true" >> "$GITHUB_OUTPUT"
             echo "release_tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
             # dev-v38 -> 38: the fourth part of the installer version

@@ -141,7 +141,9 @@ the latest `dev-v*` tag, and a message of the form
   (`1.27.0.N`), which winget and Windows compare, so tag numbers must only
   go up. `RELEASE_VERSION` stays the crate version.
 - Tag builds cover Windows, Linux (`.deb`, `.tar.gz`, apt edge) and macOS
-  (`Mentenaz-Forge-Super-aarch64.dmg` and `-x86_64.dmg`). macOS builds on
+  (`Mentenaz-Forge-Super-aarch64.dmg` only: the Intel build was dropped from tags after it was
+  cancelled at about three hours on dev-v62 and dev-v63; run the workflow by hand with
+  architecture `x86_64` to build one). macOS builds on
   `macos-26` with Xcode 26 and is only ad-hoc signed, as there is no Apple
   Developer account, so Gatekeeper warns on first open. Any platform can also
   be run by hand from the Actions tab; a manual run publishes a "dev-build"
