@@ -631,7 +631,7 @@ accesskit_windows = "0.34"
 agent-client-protocol = { version = "=5.4.0", features = ["schemars", "unstable", "unstable_protocol_v2"] }
 aho-corasick = "1.1"
 alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f" }
-forge-scaffold = { git = "https://github.com/mentenaz/Forge.Scaffold.SDK", tag = "v0.2.0" }
+forge-scaffold = { git = "https://github.com/mentenaz/Forge.Scaffold.SDK", tag = "v0.3.4" }
 # fnm as a library (the `library` branch of the fork adds the lib target,
 # and now also carries the checksum-verification work merged in from
 # `checked-downloads`/`typed-verification-error`: Node.js downloads are
