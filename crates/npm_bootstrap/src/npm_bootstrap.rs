@@ -311,6 +311,30 @@ fn start_install(
     started
 }
 
+/// Runs `npm install` in `root` on request, from a view that is not the workspace
+/// (the Scaffold panel's "Run npm install" after an add): the same run as the
+/// offer's, in the Script Runner, with the same toast, and with the same refusal
+/// for a folder the trust gate has not allowed, which the Script Runner reports.
+///
+/// The workspace is updated after the caller's own update has ended
+/// (`Window::defer`): the workspace reads every item, the calling view included,
+/// so updating it from inside a click on that view would borrow the view twice.
+pub fn install_now(
+    workspace: &WeakEntity<Workspace>,
+    root: PathBuf,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let workspace = workspace.clone();
+    window.defer(cx, move |window, cx| {
+        workspace
+            .update(cx, |workspace, cx| {
+                start_install(workspace, &root, Some(window), cx);
+            })
+            .ok();
+    });
+}
+
 enum NpmInstallResult {}
 
 /// Which stage the install is in.

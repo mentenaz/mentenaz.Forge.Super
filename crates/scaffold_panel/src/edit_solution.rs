@@ -140,6 +140,8 @@ struct AddState {
     downloading: bool,
     /// The web part's main file after an add, for "Open web part".
     added_file: Option<PathBuf>,
+    /// The last add changed `package.json`, so "Run npm install" is offered.
+    needs_install: bool,
 }
 
 pub struct EditSolutionView {
@@ -221,6 +223,7 @@ impl EditSolutionView {
                 generation: 0,
                 downloading: false,
                 added_file: None,
+                needs_install: false,
             },
             busy: None,
             message: None,
@@ -623,6 +626,7 @@ impl EditSolutionView {
                     Ok(()) => {
                         this.undo = Some(record);
                         this.add.added_file = main_file;
+                        this.add.needs_install = packages_changed;
                         this.add.preview = AddPreview::Idle;
                         // One empty row again for the next time.
                         for row in &this.add.rows {
@@ -666,6 +670,19 @@ impl EditSolutionView {
         });
     }
 
+    /// Runs `npm install` in the solution, in the Script Runner behind the trust
+    /// gate. It is offered once: the Script Runner shows the rest.
+    fn run_install(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self
+            .solution
+            .as_ref()
+            .map(|solution| solution.root.clone())
+            .unwrap_or_else(|| self.root.clone());
+        npm_bootstrap::install_now(&self.workspace, root, window, cx);
+        self.add.needs_install = false;
+        cx.notify();
+    }
+
     // ── Undo ───────────────────────────────────────────────────────────────
 
     /// Puts the files back as they were before the last change. The engine
@@ -696,6 +713,7 @@ impl EditSolutionView {
                     Ok(()) => {
                         this.undo = None;
                         this.add.added_file = None;
+                        this.add.needs_install = false;
                         this.message = Some(Ok("The last change is undone.".to_string()));
                         // Shows the files as they are now.
                         this.load(true, window, cx);
@@ -1150,6 +1168,13 @@ impl EditSolutionView {
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.open_added_file(window, cx)),
                             )
+                    }))
+                    .children(self.add.needs_install.then(|| {
+                        Button::new("scaffold-run-install")
+                            .outline()
+                            .label("Run npm install")
+                            .disabled(self.busy.is_some())
+                            .on_click(cx.listener(|this, _, window, cx| this.run_install(window, cx)))
                     }))
                     .children(self.undo_button(cx))
                     .children(self.busy_indicator(muted)),
