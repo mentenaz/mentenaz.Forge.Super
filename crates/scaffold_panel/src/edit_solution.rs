@@ -468,6 +468,19 @@ impl EditSolutionView {
             .collect()
     }
 
+    /// Each name typed with the name it becomes, `(typed, PascalCase)`: the engine
+    /// and the templates are given the second. A row that comes out empty (only
+    /// punctuation) is left out.
+    fn name_pairs(&self, cx: &App) -> Vec<(String, String)> {
+        self.typed_names(cx)
+            .into_iter()
+            .filter_map(|typed| {
+                let pascal = pascal_case(&typed);
+                (!pascal.is_empty()).then_some((typed, pascal))
+            })
+            .collect()
+    }
+
     /// Asks the engine what adding the typed names would do, off the main thread.
     fn plan_components(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.status, Status::Ready) || self.busy.is_some() {
@@ -480,7 +493,10 @@ impl EditSolutionView {
             return;
         };
         self.add.generation += 1;
-        let names = self.typed_names(cx);
+        let pairs = self.name_pairs(cx);
+        let names: Vec<String> = pairs.iter().map(|(_, pascal)| pascal.clone()).collect();
+        // The first name as typed, for the official templates' readable name.
+        let first_typed = pairs.first().map(|(typed, _)| typed.clone());
         if names.is_empty() || !candidate.installed {
             self.add.preview = AddPreview::Idle;
             cx.notify();
@@ -495,10 +511,16 @@ impl EditSolutionView {
                     let store = TemplateStore::open(templates_dir())?;
                     let template = store.resolve(&candidate.generator, &candidate.version)?;
                     // The official templates add one component at a time and are
-                    // asked for its name; ours take a list of web parts.
+                    // asked for its name; ours take a list of web parts. Both are
+                    // given the tidied PascalCase name (as the Sencorp wizard does),
+                    // so `test` is `TestWebPart` and not `testWebPart`: the engine
+                    // takes the alias from the text it is given, so the official
+                    // templates get the alias spelled out, and the readable name
+                    // as typed (`Request Form`).
                     let answers = match template.manifest.add.as_ref().map(|add| add.mode) {
                         Some(AddMode::Render) => UpstreamInputs {
-                            component_name: names[0].clone(),
+                            component_name: human_name(first_typed.as_deref().unwrap_or(&names[0])),
+                            component_alias: Some(names[0].clone()),
                             ..Default::default()
                         }
                         .add_answers(),
@@ -593,17 +615,18 @@ impl EditSolutionView {
             return;
         }
         let plan = (**plan).clone();
-        let names = self.typed_names(cx);
+        let names: Vec<String> = self
+            .name_pairs(cx)
+            .into_iter()
+            .map(|(_, pascal)| pascal)
+            .collect();
         let record = plan.undo_record(&format!("Added {}", names.join(", ")));
         // The web part's main file, for "Open web part", and whether new packages
         // were added.
         let main_file = plan
             .files
             .iter()
-            .find(|file| {
-                file.path.contains("webparts/")
-                    && (file.path.ends_with("WebPart.ts") || file.path.ends_with("WebPart.tsx"))
-            })
+            .find(|file| is_web_part_main_file(&file.path))
             .map(|file| plan.root.join(&file.path));
         let packages_changed = plan.files.iter().any(|file| file.path == "package.json");
         self.busy = Some("Adding the components…");
@@ -1000,6 +1023,12 @@ impl EditSolutionView {
             Alert::info("scaffold-add-framework", text)
         });
 
+        // The names whose spelling changes (`test` is `Test`), shown under the rows.
+        let renamed: Vec<(String, String)> = self
+            .name_pairs(cx)
+            .into_iter()
+            .filter(|(typed, pascal)| typed != pascal)
+            .collect();
         let rows = self.add.rows.len();
         let any_empty = self
             .add
@@ -1082,6 +1111,18 @@ impl EditSolutionView {
                     .child(div().text_xs().text_color(muted).child(format!(
                         "{new} new files, {merged} changed"
                     )))
+                    // Where the web part's main file goes, from the engine's plan.
+                    .children(
+                        plan.files
+                            .iter()
+                            .find(|file| is_web_part_main_file(&file.path))
+                            .map(|file| {
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(format!("Main file: {}", file.path))
+                            }),
+                    )
                     .children(plan.files.iter().map(|file| {
                         let (mark, color) = match file.outcome {
                             AddOutcome::New => ("+", success),
@@ -1139,6 +1180,17 @@ impl EditSolutionView {
             .children(framework_note)
             .children(not_downloaded)
             .child(field().label("Name").child(name_rows))
+            // What a name is tidied to, before the engine sees it.
+            .children(
+                renamed
+                    .into_iter()
+                    .map(|(typed, pascal)| {
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("\"{typed}\" is named {pascal}"))
+                    }),
+            )
             .children(one_at_a_time.then(|| {
                 div()
                     .text_xs()
@@ -1200,6 +1252,37 @@ fn read_solution(root: &Path) -> Result<(SpfxSolution, SolutionInfo, Option<Stri
                 .map(str::to_string)
         });
     Ok((solution, info, description))
+}
+
+/// Whether a path in a plan is a web part's main file (`src/webparts/x/XWebPart.ts`).
+fn is_web_part_main_file(path: &str) -> bool {
+    path.contains("webparts/") && (path.ends_with("WebPart.ts") || path.ends_with("WebPart.tsx"))
+}
+
+/// A typed name as PascalCase, the way the Sencorp wizard tidies it: words split at
+/// spaces, hyphens, underscores and dots, the first letter of each in capitals and
+/// the rest as typed, anything that is not a letter or a digit dropped. `test` is
+/// `Test`, `Request Form` is `RequestForm`, `approval-panel` is `ApprovalPanel`.
+fn pascal_case(raw: &str) -> String {
+    raw.split(|c: char| c.is_whitespace() || matches!(c, '-' | '_' | '.'))
+        .map(|word| {
+            let mut chars = word.chars().filter(|c| c.is_alphanumeric());
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// A typed name as readable words, for the title an official template shows:
+/// separators become one space and the letters stay as typed (`approval-panel` is
+/// `approval panel`).
+fn human_name(raw: &str) -> String {
+    raw.split(|c: char| c.is_whitespace() || matches!(c, '-' | '_' | '.'))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `1.23` for `1.23.2`: the engine only adds a template of the solution's minor
@@ -1416,5 +1499,45 @@ impl Render for EditSolutionView {
                     )
                     .child(body),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The same results as the Sencorp wizard's `deriveNames` gives for the Pascal form.
+    #[test]
+    fn names_are_tidied_to_pascal_case() {
+        assert_eq!(pascal_case("test"), "Test");
+        assert_eq!(pascal_case("Test"), "Test");
+        assert_eq!(pascal_case("Request Form"), "RequestForm");
+        assert_eq!(pascal_case("approval-panel"), "ApprovalPanel");
+        assert_eq!(pascal_case("myDashboard"), "MyDashboard");
+        assert_eq!(pascal_case("  two   words  "), "TwoWords");
+        assert_eq!(pascal_case("snake_case_name"), "SnakeCaseName");
+    }
+
+    #[test]
+    fn a_name_with_no_letters_or_digits_comes_out_empty() {
+        assert_eq!(pascal_case("---"), "");
+        assert_eq!(pascal_case("  "), "");
+        // Punctuation inside a word is dropped, not kept.
+        assert_eq!(pascal_case("my@part"), "Mypart");
+    }
+
+    #[test]
+    fn the_readable_name_keeps_the_letters_as_typed() {
+        assert_eq!(human_name("approval-panel"), "approval panel");
+        assert_eq!(human_name("  Request   Form "), "Request Form");
+        assert_eq!(human_name("test"), "test");
+    }
+
+    #[test]
+    fn the_main_file_is_found_in_a_plan() {
+        assert!(is_web_part_main_file("src/webparts/test/TestWebPart.ts"));
+        assert!(is_web_part_main_file("src/webparts/test/TestWebPart.tsx"));
+        assert!(!is_web_part_main_file("src/webparts/test/components/Test.tsx"));
+        assert!(!is_web_part_main_file("config/config.json"));
     }
 }
