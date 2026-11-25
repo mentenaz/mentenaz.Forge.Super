@@ -7297,8 +7297,8 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "forge-scaffold"
-version = "0.3.4"
-source = "git+https://github.com/mentenaz/Forge.Scaffold.SDK?tag=v0.3.4#83d08e681f2e7afdc386a2b1656672ff744aad08"
+version = "0.4.0-alpha.1"
+source = "git+https://github.com/mentenaz/Forge.Scaffold.SDK?tag=v0.4.0-alpha.1#fb06c629269ea88db699a4c0496daccdabc19754"
 dependencies = [
  "base64 0.22.1",
  "dirs",
