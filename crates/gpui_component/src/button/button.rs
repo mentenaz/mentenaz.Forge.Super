@@ -37,8 +37,10 @@ pub struct ButtonCustomVariant {
     color: Hsla,
     foreground: Hsla,
     shadow: bool,
-    hover: Hsla,
-    active: Hsla,
+    /// `None` until `hover` is called: then it is derived from `color` when drawn.
+    hover: Option<Hsla>,
+    /// `None` until `active` is called: then it is derived from `color` when drawn.
+    active: Option<Hsla>,
 }
 
 pub trait ButtonVariants: Sized {
@@ -100,8 +102,8 @@ impl ButtonCustomVariant {
         Self {
             color: cx.theme().transparent,
             foreground: cx.theme().foreground,
-            hover: cx.theme().transparent,
-            active: cx.theme().transparent,
+            hover: None,
+            active: None,
             shadow: false,
         }
     }
@@ -118,15 +120,18 @@ impl ButtonCustomVariant {
         self
     }
 
-    /// Set hover background color, default is transparent.
+    /// Set hover background color. Without it the hover is derived from the background:
+    /// what a ghost button shows when the background is transparent, else the
+    /// background moved a tenth of the way toward the text colour.
     pub fn hover(mut self, color: Hsla) -> Self {
-        self.hover = color;
+        self.hover = Some(color);
         self
     }
 
-    /// Set active background color, default is transparent.
+    /// Set active (pressed) background color. Without it the active colour is derived
+    /// from the background, a little stronger than the hover.
     pub fn active(mut self, color: Hsla) -> Self {
-        self.active = color;
+        self.active = Some(color);
         self
     }
 
@@ -134,6 +139,58 @@ impl ButtonCustomVariant {
     pub fn shadow(mut self, shadow: bool) -> Self {
         self.shadow = shadow;
         self
+    }
+
+    /// The hover background: the one set with `hover`, else derived from the background.
+    fn hover_color(&self, cx: &App) -> Hsla {
+        self.hover.unwrap_or_else(|| {
+            let theme = cx.theme();
+            // What a ghost button shows on hover (see `ButtonVariant::hovered`).
+            let ghost = if theme.mode.is_dark() {
+                theme.secondary.lighten(0.1).opacity(0.8)
+            } else {
+                theme.secondary.darken(0.1).opacity(0.8)
+            };
+            derived_hover(self.color, ghost, theme.foreground)
+        })
+    }
+
+    /// The active background: the one set with `active`, else derived from the background.
+    fn active_color(&self, cx: &App) -> Hsla {
+        self.active.unwrap_or_else(|| {
+            let theme = cx.theme();
+            derived_active(
+                self.color,
+                theme.tokens.secondary_active.color,
+                theme.foreground,
+            )
+        })
+    }
+}
+
+/// A background with less alpha than this counts as transparent.
+const TRANSPARENT_BELOW: f32 = 0.05;
+
+/// The hover background of a custom button that did not set one. A transparent button
+/// (an icon button) gets what a ghost button gets, so the two look alike. A button with
+/// a colour of its own moves a tenth of the way toward the text colour, which makes it
+/// lighter on a dark theme and darker on a light one.
+fn derived_hover(color: Hsla, ghost_hover: Hsla, foreground: Hsla) -> Hsla {
+    if color.a < TRANSPARENT_BELOW {
+        ghost_hover
+    } else {
+        color.mix(foreground, 0.9)
+    }
+}
+
+/// The active (pressed) background of a custom button that did not set one: the ghost
+/// button's pressed colour for a transparent button, else the colour moved a fifth of
+/// the way toward the text colour (a little stronger than the hover).
+fn derived_active(color: Hsla, ghost_active: Hsla, foreground: Hsla) -> Hsla {
+    if color.a < TRANSPARENT_BELOW {
+        ghost_active
+    } else {
+        color.mix(foreground, 0.8)
     }
 }
 
@@ -754,16 +811,10 @@ impl ButtonVariant {
     fn outline_background(&self, state: ButtonStyleState, cx: &mut App) -> Background {
         match (self, state) {
             (Self::Default, ButtonStyleState::Normal) => cx.theme().input_background().into(),
-            (Self::Default, ButtonStyleState::Hovered) => cx
-                .theme()
-                .input
-                .mix_oklab(cx.theme().transparent, 0.5)
-                .into(),
-            (Self::Default, ButtonStyleState::Active) => cx
-                .theme()
-                .input
-                .mix_oklab(cx.theme().transparent, 0.7)
-                .into(),
+            // The theme's own hover and pressed colours: the old mix of the input
+            // colour with transparent was hardly different from the resting colour.
+            (Self::Default, ButtonStyleState::Hovered) => cx.theme().tokens.button_hover.background,
+            (Self::Default, ButtonStyleState::Active) => cx.theme().tokens.button_active.background,
             (Self::Primary, ButtonStyleState::Normal) => {
                 cx.theme().tokens.primary.background.opacity(0.1)
             }
@@ -1018,7 +1069,7 @@ impl ButtonVariant {
                     cx.theme().tokens.button_info_hover.into()
                 }
             }
-            Self::Custom(colors) => colors.hover.into(),
+            Self::Custom(colors) => colors.hover_color(cx).into(),
             Self::Ghost => if cx.theme().mode.is_dark() {
                 cx.theme().secondary.lighten(0.1).opacity(0.8)
             } else {
@@ -1105,7 +1156,7 @@ impl ButtonVariant {
                     cx.theme().tokens.button_info_active.into()
                 }
             }
-            Self::Custom(colors) => colors.active.into(),
+            Self::Custom(colors) => colors.active_color(cx).into(),
             Self::Link => cx.theme().transparent.into(),
             Self::Text => cx.theme().transparent.into(),
         };
@@ -1148,7 +1199,7 @@ impl ButtonVariant {
             Self::Info => cx.theme().tokens.button_info_active.into(),
             Self::Link => cx.theme().transparent.into(),
             Self::Text => cx.theme().transparent.into(),
-            Self::Custom(colors) => colors.active.into(),
+            Self::Custom(colors) => colors.active_color(cx).into(),
         };
 
         let border = self.border_color(outline, cx);
@@ -1224,6 +1275,42 @@ mod tests {
     use super::*;
     use crate::IconName;
     use gpui::{linear_color_stop, linear_gradient, px};
+
+    #[test]
+    fn a_transparent_custom_button_hovers_and_presses_like_a_ghost_button() {
+        use gpui::hsla;
+        let transparent = hsla(0.0, 0.0, 0.0, 0.0);
+        let ghost_hover = hsla(0.6, 0.1, 0.5, 0.8);
+        let ghost_active = hsla(0.6, 0.1, 0.4, 0.9);
+        let foreground = hsla(0.0, 0.0, 1.0, 1.0);
+        assert_eq!(derived_hover(transparent, ghost_hover, foreground), ghost_hover);
+        assert_eq!(derived_active(transparent, ghost_active, foreground), ghost_active);
+        // Almost invisible still counts as transparent.
+        let faint = hsla(0.0, 0.0, 0.0, 0.01);
+        assert_eq!(derived_hover(faint, ghost_hover, foreground), ghost_hover);
+    }
+
+    #[test]
+    fn a_coloured_custom_button_moves_toward_the_text_colour() {
+        use gpui::hsla;
+        let ghost = hsla(0.6, 0.1, 0.5, 0.8);
+        let red = hsla(0.0, 0.8, 0.4, 1.0);
+        let white = hsla(0.0, 0.0, 1.0, 1.0);
+        let black = hsla(0.0, 0.0, 0.0, 1.0);
+
+        // On a dark theme the text is light: the hover is lighter, the press more so.
+        let hover = derived_hover(red, ghost, white);
+        let active = derived_active(red, ghost, white);
+        assert_ne!(hover, red);
+        assert!(hover.l > red.l, "{hover:?}");
+        assert!(active.l > hover.l, "{active:?}");
+
+        // On a light theme the text is dark: the hover is darker, the press more so.
+        let hover = derived_hover(red, ghost, black);
+        let active = derived_active(red, ghost, black);
+        assert!(hover.l < red.l, "{hover:?}");
+        assert!(active.l < hover.l, "{active:?}");
+    }
 
     #[gpui::test]
     fn disabled_legacy_button_keeps_existing_pointer_blocking(cx: &mut gpui::TestAppContext) {

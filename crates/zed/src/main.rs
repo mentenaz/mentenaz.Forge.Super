@@ -318,6 +318,52 @@ fn sync_gpui_component_theme(cx: &mut App) {
     theme.secondary_active = colors.element_active;
     theme.secondary_foreground = colors.text;
 
+    // The buttons do not read `primary`, `secondary` or the status colours
+    // above: each variant has its own `button_*` colours for resting, hover,
+    // pressed and label. Left alone they stay at gpui-component's preset, so a
+    // button's hover (the `.secondary()` Quick Actions buttons, say) matches the
+    // preset and not this theme, and can hardly differ from the resting colour.
+    // Map them from the colours just set.
+    theme.button = colors.element_background;
+    theme.button_hover = colors.element_hover;
+    theme.button_active = colors.element_active;
+    theme.button_foreground = colors.text;
+    theme.button_primary = theme.primary;
+    theme.button_primary_hover = theme.primary_hover;
+    theme.button_primary_active = theme.primary_active;
+    theme.button_primary_foreground = theme.primary_foreground;
+    theme.button_secondary = theme.secondary;
+    theme.button_secondary_hover = theme.secondary_hover;
+    theme.button_secondary_active = theme.secondary_active;
+    theme.button_secondary_foreground = theme.secondary_foreground;
+    // A status button is a solid status colour. Its hover and press are that
+    // colour a little less opaque, as for the primary button above, and its
+    // label is whichever of the theme's background and text colours stands
+    // further from the fill.
+    let label_on = |fill: gpui::Hsla| {
+        if (fill.l - colors.background.l).abs() >= (fill.l - colors.text.l).abs() {
+            colors.background
+        } else {
+            colors.text
+        }
+    };
+    theme.button_danger = status.error;
+    theme.button_danger_hover = status.error.opacity(0.85);
+    theme.button_danger_active = status.error.opacity(0.7);
+    theme.button_danger_foreground = label_on(status.error);
+    theme.button_warning = status.warning;
+    theme.button_warning_hover = status.warning.opacity(0.85);
+    theme.button_warning_active = status.warning.opacity(0.7);
+    theme.button_warning_foreground = label_on(status.warning);
+    theme.button_success = status.success;
+    theme.button_success_hover = status.success.opacity(0.85);
+    theme.button_success_active = status.success.opacity(0.7);
+    theme.button_success_foreground = label_on(status.success);
+    theme.button_info = status.info;
+    theme.button_info_hover = status.info.opacity(0.85);
+    theme.button_info_active = status.info.opacity(0.7);
+    theme.button_info_foreground = label_on(status.info);
+
     // `theme.tokens` is a *snapshot* of `theme.colors` taken once by
     // `Theme::change`/`Theme::from` (`ThemeTokens::from(colors)`) — it isn't
     // live-derived, so the field-by-field overrides above (written through
