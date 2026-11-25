@@ -50,6 +50,8 @@ use workspace::{OpenOptions, Workspace, item::Item};
 
 use crate::{HttpFetch, templates_dir};
 
+mod packages;
+
 /// The solution file that holds the three values.
 const SOLUTION_FILE: &str = "config/package-solution.json";
 
@@ -82,6 +84,7 @@ enum Status {
 enum Page {
     Details,
     Components,
+    Packages,
 }
 
 /// What the engine says about the values as typed.
@@ -163,6 +166,8 @@ pub struct EditSolutionView {
     /// Counts the plans asked for; a plan that arrives for an older one is dropped.
     generation: u64,
     add: AddState,
+    /// The Packages page: importing a package from a folder.
+    packages: packages::PackagesState,
     /// What is running ("Applying the changes…"), while something is.
     busy: Option<&'static str>,
     /// The result of the last apply or undo.
@@ -225,6 +230,7 @@ impl EditSolutionView {
                 added_file: None,
                 needs_install: false,
             },
+            packages: packages::PackagesState::default(),
             busy: None,
             message: None,
             undo: None,
@@ -1446,19 +1452,20 @@ impl Render for EditSolutionView {
                     TabBar::new("scaffold-edit-pages")
                         .with_variant(TabVariant::Underline)
                         .children(
-                            ["Details", "Components"]
+                            ["Details", "Components", "Packages"]
                                 .iter()
                                 .map(|label| Tab::new().label(*label)),
                         )
                         .selected_index(match self.page {
                             Page::Details => 0,
                             Page::Components => 1,
+                            Page::Packages => 2,
                         })
                         .on_click(cx.listener(|this, index: &usize, _, cx| {
-                            this.page = if *index == 1 {
-                                Page::Components
-                            } else {
-                                Page::Details
+                            this.page = match *index {
+                                1 => Page::Components,
+                                2 => Page::Packages,
+                                _ => Page::Details,
                             };
                             cx.notify();
                         })),
@@ -1466,6 +1473,7 @@ impl Render for EditSolutionView {
                 .child(match self.page {
                     Page::Details => self.render_details(cx),
                     Page::Components => self.render_components(cx),
+                    Page::Packages => self.render_packages(cx),
                 })
                 .children(self.message.as_ref().map(|message| match message {
                     Ok(text) => Alert::success("scaffold-edit-done", text.clone()),

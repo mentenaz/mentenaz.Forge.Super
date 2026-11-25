@@ -274,6 +274,19 @@ fn start_install(
     window: Option<&mut Window>,
     cx: &mut Context<Workspace>,
 ) -> bool {
+    start_command(workspace, root, INSTALL_COMMAND, window, cx)
+}
+
+/// Runs `command` (an `npm install ...`) in `root` in the Script Runner, as
+/// `start_install` does: the same refusal for a busy runner, the same toast, and
+/// the same trust gate in the Script Runner.
+fn start_command(
+    workspace: &mut Workspace,
+    root: &Path,
+    command: &str,
+    window: Option<&mut Window>,
+    cx: &mut Context<Workspace>,
+) -> bool {
     let Some(runner) = workspace.panel::<ScriptRunnerPanel>(cx) else {
         workspace.show_toast(
             Toast::new(
@@ -300,7 +313,7 @@ fn start_install(
         workspace.reveal_panel::<ScriptRunnerPanel>(window, cx);
     }
     runner.update(cx, |runner, cx| {
-        runner.run_external(INSTALL_COMMAND.to_string(), root.display().to_string(), cx);
+        runner.run_external(command.to_string(), root.display().to_string(), cx);
     });
     // A run that was refused (the folder is not trusted, say) never started:
     // the toast then says so, instead of claiming an install is going.
@@ -330,6 +343,27 @@ pub fn install_now(
         workspace
             .update(cx, |workspace, cx| {
                 start_install(workspace, &root, Some(window), cx);
+            })
+            .ok();
+    });
+}
+
+/// Runs `command` in `root` on request, like `install_now` (the Scaffold panel's
+/// "Install the missing packages" runs `npm install <package>@<version>`). Only an
+/// `npm install` should be given here: the Script Runner asks the trust gate, but
+/// the caller decides what is run.
+pub fn run_install_command(
+    workspace: &WeakEntity<Workspace>,
+    root: PathBuf,
+    command: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let workspace = workspace.clone();
+    window.defer(cx, move |window, cx| {
+        workspace
+            .update(cx, |workspace, cx| {
+                start_command(workspace, &root, &command, Some(window), cx);
             })
             .ok();
     });
