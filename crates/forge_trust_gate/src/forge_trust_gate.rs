@@ -88,11 +88,11 @@ pub fn set_project_roots(owner: u64, trusted: Vec<PathBuf>, restricted: Vec<Path
     let roots = Roots {
         trusted: trusted
             .iter()
-            .map(|path| normalize(&absolute(path)))
+            .map(|path| normalize(&resolve(path)))
             .collect(),
         restricted: restricted
             .iter()
-            .map(|path| normalize(&absolute(path)))
+            .map(|path| normalize(&resolve(path)))
             .collect(),
     };
     let previous = lock().projects.insert(owner, Some(roots.clone()));
@@ -113,7 +113,7 @@ pub fn is_settled() -> bool {
 /// How `path` stands. A restricted folder wins over a trusted one that contains
 /// it.
 pub fn classify(path: impl AsRef<Path>) -> Trust {
-    let path = normalize(&absolute(path.as_ref()));
+    let path = normalize(&resolve(path.as_ref()));
     let state = lock();
     let roots = || state.projects.values().flatten();
     if roots().any(|r| r.restricted.iter().any(|root| is_inside(&path, root))) {
@@ -347,6 +347,62 @@ pub fn resolve_program(program: &Path) -> Option<PathBuf> {
 
 fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Where `path` really is. A folder is judged by its real location, not by how a
+/// path to it is spelled: `repo/../elsewhere` and a symlink inside a trusted folder
+/// that points out of it are not inside it. Comparing the spelling would let both
+/// pass (`std::path::absolute` keeps `..` on Linux and macOS and never follows
+/// symlinks).
+///
+/// A path that exists is resolved by the file system. One that does not exist yet
+/// (a folder about to be created) keeps its missing tail, after the part that
+/// exists is resolved. The trusted and restricted roots are resolved the same way,
+/// so both sides of a comparison are real paths.
+fn resolve(path: &Path) -> PathBuf {
+    let absolute = absolute(path);
+    if let Ok(real) = std::fs::canonicalize(&absolute) {
+        return real;
+    }
+    let collapsed = collapse(&absolute);
+    let mut missing = Vec::new();
+    let mut existing = collapsed.as_path();
+    loop {
+        if let Ok(mut real) = std::fs::canonicalize(existing) {
+            real.extend(missing.iter().rev());
+            return real;
+        }
+        match (existing.file_name(), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                missing.push(name.to_owned());
+                existing = parent;
+            }
+            _ => return collapsed,
+        }
+    }
+}
+
+/// `path` without its `.` and `..` components, by the spelling alone. Only for the
+/// part of a path that does not exist, where there is no symlink to follow.
+fn collapse(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Never above the root.
+                if !matches!(
+                    out.components().next_back(),
+                    None | Some(Component::RootDir | Component::Prefix(_))
+                ) {
+                    out.pop();
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Forward slashes, no `\\?\` prefix, no trailing slash, and lower case on
@@ -657,5 +713,136 @@ mod tests {
             normalize(Path::new("\\\\?\\C:\\Proj")).to_lowercase(),
             "c:/proj"
         );
+    }
+
+    /// A folder of its own under the temp folder, made fresh for one test.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("forge_trust_gate_{}_{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A link at `link` to the folder `target`: a symlink, or on Windows a junction
+    /// when symlinks are not allowed. False when neither could be made.
+    fn link_folder(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(target, link).is_ok()
+                || std::process::Command::new("cmd")
+                    .args(["/C", "mklink", "/J"])
+                    .arg(link)
+                    .arg(target)
+                    .output()
+                    .is_ok_and(|out| out.status.success())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target, link);
+            false
+        }
+    }
+
+    #[test]
+    fn dot_dot_cannot_leave_a_trusted_folder() {
+        let _turn = fresh();
+        enforce();
+        classified(&["/work/repo"], &[]);
+        assert_eq!(
+            check("/work/repo/../elsewhere"),
+            Err(UNCHECKED_MESSAGE.to_string())
+        );
+        assert_eq!(
+            check("/work/repo/sub/../../elsewhere"),
+            Err(UNCHECKED_MESSAGE.to_string())
+        );
+        // Staying inside still works, and `.` changes nothing.
+        assert_eq!(check("/work/repo/sub/../other"), Ok(()));
+        assert_eq!(check("/work/repo/./sub"), Ok(()));
+        // Above the root is the root, not a way round it.
+        assert_eq!(check("/../work/repo/x"), Ok(()));
+    }
+
+    #[test]
+    fn a_link_out_of_a_trusted_folder_does_not_carry_trust() {
+        let _turn = fresh();
+        let scratch = Scratch::new("link_out");
+        let trusted = scratch.0.join("trusted");
+        let outside = scratch.0.join("outside");
+        std::fs::create_dir_all(trusted.join("pkg")).unwrap();
+        std::fs::create_dir_all(outside.join("evil")).unwrap();
+        if !link_folder(&outside.join("evil"), &trusted.join("link")) {
+            eprintln!("no folder link could be made here; skipping");
+            return;
+        }
+        enforce();
+        begin_project(1);
+        set_project_roots(1, vec![trusted.clone()], Vec::new());
+
+        assert_eq!(check(trusted.join("pkg")), Ok(()));
+        // The link looks inside the trusted folder; where it leads is not.
+        assert_eq!(
+            check(trusted.join("link")),
+            Err(UNCHECKED_MESSAGE.to_string())
+        );
+        assert_eq!(
+            check(trusted.join("link").join("not-made-yet")),
+            Err(UNCHECKED_MESSAGE.to_string())
+        );
+        assert_eq!(classify(outside.join("evil")), Trust::Unclassified);
+    }
+
+    #[test]
+    fn a_link_to_a_trusted_folder_is_that_folder() {
+        let _turn = fresh();
+        let scratch = Scratch::new("link_in");
+        let repo = scratch.0.join("repo");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        let alias = scratch.0.join("alias");
+        if !link_folder(&repo, &alias) {
+            eprintln!("no folder link could be made here; skipping");
+            return;
+        }
+        enforce();
+        begin_project(1);
+        // The editor gives the real folder; a path through the alias is the same place.
+        set_project_roots(1, vec![repo.clone()], Vec::new());
+        assert_eq!(check(alias.join("sub")), Ok(()));
+        // And the other way round: trusted by the alias, reached by the real path.
+        set_project_roots(1, vec![alias.clone()], Vec::new());
+        assert_eq!(check(repo.join("sub")), Ok(()));
+    }
+
+    #[test]
+    fn a_restricted_folder_is_still_restricted_through_a_link() {
+        let _turn = fresh();
+        let scratch = Scratch::new("link_restricted");
+        let work = scratch.0.join("work");
+        let secret = work.join("secret");
+        std::fs::create_dir_all(&secret).unwrap();
+        let alias = scratch.0.join("alias");
+        if !link_folder(&secret, &alias) {
+            eprintln!("no folder link could be made here; skipping");
+            return;
+        }
+        enforce();
+        begin_project(1);
+        set_project_roots(1, vec![work.clone()], vec![secret.clone()]);
+        assert_eq!(check(&alias), Err(RESTRICTED_MESSAGE.to_string()));
     }
 }
