@@ -44,6 +44,7 @@ $forkCrates = @(
     'dotnet_backend',
     'dotnet_panel',
     'flows_panel',
+    'forge_trust_gate',
     'helm_backend',
     'helm_ui',
     'helm_workspace',
