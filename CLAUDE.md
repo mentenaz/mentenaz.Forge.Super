@@ -148,6 +148,15 @@ the latest `dev-v*` tag, and a message of the form
   Developer account, so Gatekeeper warns on first open. Any platform can also
   be run by hand from the Actions tab; a manual run publishes a "dev-build"
   pre-release only if `publish_release` is ticked.
+- The Mac build has run past the 180 minute limit of `build_installers` on every tag
+  but dev-v63 (a cold compile on a 3-core runner, 2h57 when it succeeded), and the
+  release waits for it. `build_macos` is a separate, manual workflow with a 350 minute
+  limit: give it a tag (e.g. `dev-v67`) and it builds that commit's `.dmg`, then adds it
+  to that tag's release and tells the website again. It waits for the release (4
+  checks, 4 minutes apart) and fails with a message if there is none; the `.dmg` stays
+  as the run's artifact. It has no tag trigger yet: moving the Mac build out of
+  `build_installers`, and out of `publish_release`'s `needs`, comes after a run of it
+  has attached a `.dmg`.
 - GitHub often cancels the macOS jobs after 15 minutes with "not acquired by
   Runner" (no free Apple runner). That is not a build error: once the whole
   run has finished, re-run just those with `gh run rerun <id> --failed`.
