@@ -1,24 +1,27 @@
-# Builds the macOS .dmg for a release that already has a tag, and attaches it to
-# that tag's GitHub Release.
+# Builds the macOS .dmg for a release and attaches it to that release.
 #
-# Why this is its own workflow: build_installers.yml publishes the release only
-# when all of its builds are done, and the Mac build alone has needed up to three
+# It starts by itself when a "dev-v*" tag is pushed, at the same moment as
+# build_installers.yml, and can also be run by hand for a tag that exists
+# (Actions -> build_macos -> Run workflow, with the tag, e.g. dev-v67).
+#
+# Why this is not a job of build_installers.yml: the release is published when all
+# of that workflow's builds are done, and the Mac build alone has needed up to three
 # hours (a cold build on a 3-core runner), so every release waited for it, and when
-# it hit the 180 minute limit it was cancelled. Here it has its own, longer
-# limit and the release does not wait for it.
-#
-# For now it is started by hand (Actions -> build_macos -> Run workflow, with the
-# tag, e.g. dev-v67). Moving the Mac build out of build_installers.yml's tag
-# trigger and into this one is a later step: do it only after a run of this
-# workflow has attached a .dmg, or a tag would build the Mac twice.
+# it hit the 180 minute limit it was cancelled. Here it has its own, longer limit and
+# the release does not wait for it: Windows and Linux publish the release, and this
+# adds the .dmg to it when it is ready.
 #
 # The release is made by build_installers.yml's publish job (it writes the release
 # notes). This workflow only adds its file to it: it checks for the release every
 # 4 minutes, 4 times, and fails with a message if it is still missing. The .dmg
-# stays available as this run's artifact either way.
+# stays available as this run's artifact either way, and a run by hand for the same
+# tag attaches it again.
 name: build_macos
 
 on:
+  push:
+    tags:
+      - "dev-v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -43,6 +46,9 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
   CARGO_INCREMENTAL: 0
+  # A tag push has no `inputs`: it builds the tag that was pushed, for Apple Silicon.
+  TAG: ${{ inputs.tag || github.ref_name }}
+  ARCH: ${{ inputs.architecture || 'aarch64' }}
 
 permissions:
   contents: write
@@ -50,7 +56,7 @@ permissions:
 # One run per tag and architecture, and a new run never cancels one in progress:
 # a Mac build is hours of work.
 concurrency:
-  group: build_macos-${{ inputs.tag }}-${{ inputs.architecture }}
+  group: build_macos-${{ inputs.tag || github.ref_name }}-${{ inputs.architecture || 'aarch64' }}
   cancel-in-progress: false
 
 jobs:
@@ -63,8 +69,6 @@ jobs:
       # The tag goes into a git ref and a shell command: accept only the shape
       # of a release tag.
       - name: Check the tag
-        env:
-          TAG: ${{ inputs.tag }}
         run: |
           if ! printf '%s' "$TAG" | grep -Eq '^dev-v[0-9]+$'; then
             echo "::error::'$TAG' is not a release tag like dev-v67."
@@ -74,14 +78,14 @@ jobs:
       - name: Checkout the tag
         uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: refs/tags/${{ env.TAG }}
           clean: false
 
       - name: Cache cargo registry and build output
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
-          key: macos-${{ inputs.architecture }}
+          key: macos-${{ env.ARCH }}
           # A build that runs out of time still saves what it compiled, so the
           # next run carries on from there.
           cache-on-failure: true
@@ -105,21 +109,20 @@ jobs:
       - name: Build the bundle (script/bundle-mac)
         # Ends the step before the job limit, leaving time to save the cache.
         timeout-minutes: 320
-        env:
-          ARCH: ${{ inputs.architecture }}
         run: |
           ./script/bundle-mac "${ARCH}-apple-darwin"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-dmg-${{ inputs.architecture }}
-          path: target/${{ inputs.architecture }}-apple-darwin/release/Mentenaz-Forge-Super-${{ inputs.architecture }}.dmg
+          name: macos-dmg-${{ env.ARCH }}
+          path: target/${{ env.ARCH }}-apple-darwin/release/Mentenaz-Forge-Super-${{ env.ARCH }}.dmg
           if-no-files-found: error
 
   attach:
     needs: build
-    if: ${{ inputs.attach }}
+    # A tag push always attaches; a run by hand can opt out.
+    if: ${{ github.event_name == 'push' || inputs.attach }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Repeated from the top level because a job-level block replaces it: the same
@@ -133,7 +136,7 @@ jobs:
       - name: Download the .dmg
         uses: actions/download-artifact@v4
         with:
-          name: macos-dmg-${{ inputs.architecture }}
+          name: macos-dmg-${{ env.ARCH }}
           path: dist
 
       - name: Attest build provenance
@@ -147,7 +150,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ inputs.tag }}
         run: |
           tries=4
           for attempt in $(seq 1 "$tries"); do
@@ -158,14 +160,13 @@ jobs:
             echo "Release $TAG not found yet (try $attempt of $tries)."
             if [ "$attempt" -lt "$tries" ]; then sleep 240; fi
           done
-          echo "::error::Release $TAG was not found after about 16 minutes, so the Windows and Linux publish has not run. The .dmg is kept as this run's artifact macos-dmg-${{ inputs.architecture }}; run build_macos again once the release exists."
+          echo "::error::Release $TAG was not found after about 16 minutes, so the Windows and Linux publish has not run. The .dmg is kept as this run's artifact macos-dmg-${ARCH}; run build_macos again once the release exists."
           exit 1
 
       - name: Attach the .dmg to the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ inputs.tag }}
         run: |
           gh release upload "$TAG" dist/*.dmg --clobber
 
@@ -177,7 +178,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ inputs.tag }}
           RELEASE_SYNC_SECRET: ${{ secrets.FORGE_RELEASE_SYNC_SECRET }}
         run: |
           if [ -z "$RELEASE_SYNC_SECRET" ]; then

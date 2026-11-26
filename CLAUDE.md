@@ -140,23 +140,26 @@ the latest `dev-v*` tag, and a message of the form
 - The `N` in the tag is the fourth part of the installer version
   (`1.27.0.N`), which winget and Windows compare, so tag numbers must only
   go up. `RELEASE_VERSION` stays the crate version.
-- Tag builds cover Windows, Linux (`.deb`, `.tar.gz`, apt edge) and macOS
-  (`Mentenaz-Forge-Super-aarch64.dmg` only: the Intel build was dropped from tags after it was
-  cancelled at about three hours on dev-v62 and dev-v63; run the workflow by hand with
-  architecture `x86_64` to build one). macOS builds on
+- A tag starts two workflows. `build_installers` builds Windows and Linux (`.deb`,
+  `.tar.gz`, apt edge) and publishes the release; `build_macos` builds
+  `Mentenaz-Forge-Super-aarch64.dmg` and adds it to that release when it is done (the
+  Intel build was dropped from tags after it was cancelled at about three hours on
+  dev-v62 and dev-v63; run `build_macos` by hand with architecture `x86_64` to build one).
+  macOS builds on
   `macos-26` with Xcode 26 and is only ad-hoc signed, as there is no Apple
   Developer account, so Gatekeeper warns on first open. Any platform can also
   be run by hand from the Actions tab; a manual run publishes a "dev-build"
   pre-release only if `publish_release` is ticked.
-- The Mac build has run past the 180 minute limit of `build_installers` on every tag
-  but dev-v63 (a cold compile on a 3-core runner, 2h57 when it succeeded), and the
-  release waits for it. `build_macos` is a separate, manual workflow with a 350 minute
-  limit: give it a tag (e.g. `dev-v67`) and it builds that commit's `.dmg`, then adds it
-  to that tag's release and tells the website again. It waits for the release (4
-  checks, 4 minutes apart) and fails with a message if there is none; the `.dmg` stays
-  as the run's artifact. It has no tag trigger yet: moving the Mac build out of
-  `build_installers`, and out of `publish_release`'s `needs`, comes after a run of it
-  has attached a `.dmg`.
+- The Mac build is separate because it has run past `build_installers`' 180 minute limit on
+  every tag but dev-v63 (a cold compile on a 3-core runner, 2h55 to 2h57 when it succeeded),
+  and the release used to wait for it. `build_macos` starts on the same `dev-v*` tag with a
+  350 minute limit, builds that commit, then adds the `.dmg` to the tag's release and tells
+  the website again. So the Windows and Linux files appear after about two hours and the
+  Mac one about an hour later. It waits for the release (4 checks, 4 minutes apart) and fails
+  with a message if there is none; the `.dmg` stays as the run's artifact. For a tag that
+  already exists (or a lost `.dmg`) run it by hand: Actions -> build_macos -> Run workflow,
+  or `gh workflow run build_macos.yml --ref main -f tag=dev-vN -f architecture=aarch64`.
+  A new tag does not cancel a Mac build in progress (its own concurrency group).
 - GitHub often cancels the macOS jobs after 15 minutes with "not acquired by
   Runner" (no free Apple runner). That is not a build error: once the whole
   run has finished, re-run just those with `gh run rerun <id> --failed`.

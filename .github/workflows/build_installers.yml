@@ -6,11 +6,12 @@ name: build_installers
 #    build, one architecture shared across all of them, and whether to
 #    publish. Good for testing one platform at a time.
 # 2. Automatic: push a tag matching "dev-v*" (e.g. `git tag dev-v1 && git
-#    push origin dev-v1`). Builds Windows and Linux for x86_64 and macOS for
-#    Apple Silicon only (see below), and always publishes,
+#    push origin dev-v1`). Builds Windows and Linux for x86_64 and always publishes,
 #    under that exact tag name instead of the rolling
 #    "dev-build" the manual path uses — so each tagged run gets its own
-#    permanent Release page rather than overwriting the last one.
+#    permanent Release page rather than overwriting the last one. macOS is not
+#    built here on a tag: build_macos.yml starts from the same tag and adds the
+#    .dmg to this release when it is done (see below).
 #
 # Deliberately NOT "v*": that's the exact pattern release.yml (the real Zed
 # release pipeline) already listens for. Every job in that workflow is
@@ -115,14 +116,16 @@ jobs:
             echo "architecture=x86_64" >> "$GITHUB_OUTPUT"
             echo "build_windows=true" >> "$GITHUB_OUTPUT"
             echo "build_linux=true" >> "$GITHUB_OUTPUT"
-            # macOS builds on macos-26 with Xcode 26, where webrtc-sys compiles
-            # (it did not on macos-14's Xcode 15). A tag builds Apple Silicon
-            # only. The Intel build was cancelled after about three hours on the
-            # bundle step on dev-v62 and dev-v63, and Intel Macs are a shrinking
-            # group (macOS 26 is the last release for them). It is not removed:
-            # a manual run with architecture x86_64 still builds it. The Windows
+            # A tag does not build macOS here. That build has needed up to three hours
+            # on a cold cache, and the release waited for it. build_macos.yml starts
+            # from the same tag with its own, longer limit and adds the Apple Silicon
+            # .dmg to the release when it is ready, so Windows and Linux publish as
+            # soon as they are done. (Intel was dropped from tags after it was
+            # cancelled on dev-v62 and dev-v63; build_macos.yml run by hand with
+            # architecture x86_64 still builds it.) A manual run of this workflow
+            # can still build macOS, for a macOS-only compile check. The Windows
             # and Linux builds are x86_64 only.
-            echo "build_macos=true" >> "$GITHUB_OUTPUT"
+            echo "build_macos=false" >> "$GITHUB_OUTPUT"
             echo "macos_check_only=false" >> "$GITHUB_OUTPUT"
             echo 'macos_archs=["aarch64"]' >> "$GITHUB_OUTPUT"
             echo "publish_release=true" >> "$GITHUB_OUTPUT"
@@ -557,8 +560,9 @@ jobs:
           >   **Privacy & Security** and choose **Open Anyway** (on older macOS:
           >   right-click the app and choose **Open**), or run
           >   \`xattr -cr "/Applications/Mentenaz Forge Super.app"\` after copying it
-          >   over. Pick the **aarch64** disk image for Apple Silicon Macs, **x86_64**
-          >   for Intel.
+          >   over. The disk image (Apple Silicon) is built in a separate run and
+          >   added to this release when it is ready, usually a while after the
+          >   others.
           > - **Linux:** an unsigned \`.tar.gz\` and \`.deb\`.
 
           **Check a download** was built by this repository's workflow and not
