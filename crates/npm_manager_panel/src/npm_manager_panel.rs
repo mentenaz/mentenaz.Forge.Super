@@ -21,7 +21,7 @@
 //!   the panel itself).
 //! - The Forge "Ecosystem security-findings aggregator" (a host `Dashboard`
 //!   feed) is dropped — this Zed host has no Dashboard consumer, so the panel
-//!   surfaces the local per-package `npm audit` list (`list_audit_vulns`).
+//!   surfaces the local `npm audit` advisories (`list_audit_report`).
 //! - The engines check (`npm_backend::engine_compat`) compares the active
 //!   node/npm with what the project requires — `.nvmrc`, `.node-version` or
 //!   `package.json` `engines`, the same files the Node panel reads — and says
@@ -46,9 +46,9 @@ use gpui_component::{
     v_flex,
 };
 use npm_backend::{
-    EngineCompat, NpmAuditVuln, NpmInstalledPkg, NpmOutdatedPkg, NpmPackageDetails,
-    NpmSearchResult, PackageManager, UpdateKind, classify_update, engine_compat, list_audit_vulns,
-    list_installed, list_outdated, run_npm_cli, version_from_output,
+    AuditReport, EngineCompat, NpmInstalledPkg, NpmOutdatedPkg, NpmPackageDetails, NpmSearchResult,
+    PackageManager, UpdateKind, classify_update, engine_compat, list_audit_report, list_installed,
+    list_outdated, run_npm_cli, version_from_output,
 };
 use script_runner_panel::ScriptRunnerPanel;
 use script_runner_panel::command::{check_package_name, check_version};
@@ -56,6 +56,7 @@ use std::path::{Path, PathBuf};
 use workspace::{Item, ItemId, SerializableItem, Workspace, WorkspaceId};
 use zed_actions::npm_manager::{NpmPage, OpenNpmManager};
 
+mod audit_card;
 mod details;
 mod pages;
 mod search;
@@ -181,7 +182,11 @@ pub struct NpmProject {
     pub installed_loading: bool,
     pub outdated: Vec<NpmOutdatedPkg>,
     pub outdated_loading: bool,
-    pub audit: Vec<NpmAuditVuln>,
+    /// The audit split by advisory into production and dev.
+    pub audit: AuditReport,
+    /// Why the last audit failed. Kept apart from `audit` so a failed scan is
+    /// not shown as a clean project.
+    pub audit_error: Option<String>,
     pub audit_loading: bool,
     pub engine: Option<EngineCompat>,
     /// Set when this project's `list_installed` fails — the render then shows
@@ -201,7 +206,8 @@ impl NpmProject {
             installed_loading: true,
             outdated: Vec::new(),
             outdated_loading: true,
-            audit: Vec::new(),
+            audit: AuditReport::default(),
+            audit_error: None,
             audit_loading: true,
             engine: None,
             load_error: None,
@@ -224,7 +230,8 @@ impl NpmProject {
             installed_loading: true,
             outdated: Vec::new(),
             outdated_loading: true,
-            audit: Vec::new(),
+            audit: AuditReport::default(),
+            audit_error: None,
             audit_loading: true,
             engine: None,
             load_error: None,
@@ -296,7 +303,7 @@ pub struct NpmManagerPanel {
     pages: pages::PageViews,
 }
 
-/// How often the tab re-runs `list_installed`/`list_outdated`/`list_audit_vulns`
+/// How often the tab re-runs `list_installed`/`list_outdated`/`list_audit_report`
 /// in the background while it's open, keeping the lists fresh without any user
 /// action.
 const AUTO_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -584,7 +591,7 @@ impl NpmManagerPanel {
                 cx.background_spawn({
                     let root = root.clone();
                     let cli = cli.clone();
-                    async move { list_audit_vulns(&root, &cli) }
+                    async move { list_audit_report(&root, &cli) }
                 }),
                 cx.background_spawn({
                     let root = root.clone();
@@ -627,7 +634,16 @@ impl NpmManagerPanel {
                                 Err(e) => active.load_error = Some(e),
                             }
                             active.outdated = outdated.unwrap_or_default();
-                            active.audit = audit.unwrap_or_default();
+                            match audit {
+                                Ok(report) => {
+                                    active.audit = report;
+                                    active.audit_error = None;
+                                }
+                                Err(error) => {
+                                    active.audit = AuditReport::default();
+                                    active.audit_error = Some(error);
+                                }
+                            }
                         } else {
                             // Silent refresh: keep existing lists and just
                             // merge in whatever the probes produced, so a
@@ -638,8 +654,13 @@ impl NpmManagerPanel {
                             if let Ok(list) = outdated {
                                 active.outdated = list;
                             }
-                            if let Ok(list) = audit {
-                                active.audit = list;
+                            match audit {
+                                Ok(report) => {
+                                    active.audit = report;
+                                    active.audit_error = None;
+                                }
+                                // Keep what was shown, but say the refresh failed.
+                                Err(error) => active.audit_error = Some(error),
                             }
                         }
                         active.installed_loading = false;

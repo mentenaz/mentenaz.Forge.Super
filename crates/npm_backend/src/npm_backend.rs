@@ -66,6 +66,77 @@ pub struct NpmAuditVuln {
     pub fixed_in: Option<String>,
 }
 
+/// What `npm audit` says about fixing an advisory.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+pub enum AuditFix {
+    /// No fix is known yet.
+    None,
+    /// A fix exists within the declared ranges, at this version when the audit names one.
+    Available(Option<String>),
+    /// The fix is a breaking (major) upgrade, to this version when the audit names one.
+    Breaking(Option<String>),
+}
+
+/// One package that is flagged because it depends, directly or not, on the
+/// package an advisory is about.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct AuditAffected {
+    pub package: String,
+    pub severity: String,
+    /// True when the project's own `package.json` lists it.
+    pub is_direct: bool,
+    /// Where it sits in `node_modules`, e.g. `node_modules/jest-config`.
+    pub location: String,
+    pub fix: AuditFix,
+}
+
+/// One advisory with the packages it reaches: what the audit views show a card for.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct AuditAdvisory {
+    /// The advisory's id (GitHub's `source`), or `package:title` when there is none.
+    pub id: String,
+    /// The package the advisory is about.
+    pub package: String,
+    pub severity: String,
+    pub title: String,
+    pub url: String,
+    pub cwe: Vec<String>,
+    /// The vulnerable version range.
+    pub range: String,
+    pub fix: AuditFix,
+    /// Every package flagged because of this one, nearest first.
+    pub affected: Vec<AuditAffected>,
+    /// The project's own dependencies among `package` and `affected`: what to upgrade.
+    pub direct_via: Vec<String>,
+}
+
+impl From<&AuditAdvisory> for NpmAuditVuln {
+    fn from(advisory: &AuditAdvisory) -> Self {
+        NpmAuditVuln {
+            package: advisory.package.clone(),
+            severity: advisory.severity.clone(),
+            title: advisory.title.clone(),
+            url: advisory.url.clone(),
+            exploitability: None,
+            fixed_in: match &advisory.fix {
+                AuditFix::Available(version) | AuditFix::Breaking(version) => version.clone(),
+                AuditFix::None => None,
+            },
+        }
+    }
+}
+
+/// The audit of one project, split by whether the advisory reaches production.
+#[derive(serde::Serialize, Clone, Debug, Default)]
+pub struct AuditReport {
+    /// Advisories in what ships (`npm audit --omit=dev`).
+    pub production: Vec<AuditAdvisory>,
+    /// Advisories found only in dev dependencies (the full audit minus `production`).
+    pub dev: Vec<AuditAdvisory>,
+    /// Why the dev half is missing, when the full audit failed but the production one did not.
+    pub dev_error: Option<String>,
+}
+
 /// Result of classifying a version delta.
 #[derive(serde::Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum UpdateKind {
@@ -261,6 +332,38 @@ pub fn list_audit_vulns(project_root: &str, cli_name: &str) -> Result<Vec<NpmAud
         &["audit".into(), "--json".into(), "--omit=dev".into()],
     )?;
     parse_audit(&output)
+}
+
+/// Audits a project twice: production dependencies only, then everything. An
+/// advisory in the first run is production; one only in the second is dev. The
+/// audit output does not say which a package is, so the difference is how it is told.
+pub fn list_audit_report(project_root: &str, cli_name: &str) -> Result<AuditReport, String> {
+    let production_output = run_npm_cli(
+        project_root,
+        cli_name,
+        &["audit".into(), "--json".into(), "--omit=dev".into()],
+    )?;
+    let production = parse_audit_advisories(&production_output)?;
+
+    let everything = run_npm_cli(project_root, cli_name, &["audit".into(), "--json".into()])
+        .and_then(|output| parse_audit_advisories(&output));
+    let (dev, dev_error) = match everything {
+        Ok(all) => {
+            let shipped: std::collections::HashSet<&str> =
+                production.iter().map(|a| a.id.as_str()).collect();
+            let dev = all
+                .into_iter()
+                .filter(|a| !shipped.contains(a.id.as_str()))
+                .collect();
+            (dev, None)
+        }
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    Ok(AuditReport {
+        production,
+        dev,
+        dev_error,
+    })
 }
 
 // ── Parsers ───────────────────────────────────────────────────────────
@@ -470,6 +573,326 @@ pub fn parse_audit(raw: &str) -> Result<Vec<NpmAuditVuln>, String> {
 
     out.sort_by(|a, b| a.package.cmp(&b.package));
     Ok(out)
+}
+
+fn severity_rank(severity: &str) -> u8 {
+    match severity {
+        "critical" => 4,
+        "high" => 3,
+        "moderate" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
+fn audit_fix(entry: &serde_json::Value) -> AuditFix {
+    match entry.get("fixAvailable") {
+        Some(serde_json::Value::Bool(true)) => AuditFix::Available(None),
+        Some(fix @ serde_json::Value::Object(_)) => {
+            let version = fix
+                .get("version")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+                .map(str::to_string);
+            if fix.get("isSemVerMajor").and_then(|v| v.as_bool()) == Some(true) {
+                AuditFix::Breaking(version)
+            } else {
+                AuditFix::Available(version)
+            }
+        }
+        _ => AuditFix::None,
+    }
+}
+
+/// Groups `npm audit --json` by advisory. The advisory text sits only on the
+/// package it is about; a package that merely depends on it lists the other
+/// package's name in `via`. So each advisory is found on its own package and
+/// the packages it reaches are walked out through `effects`.
+pub fn parse_audit_advisories(raw: &str) -> Result<Vec<AuditAdvisory>, String> {
+    let json: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("cannot parse npm audit output: {e}"))?;
+    let mut out: Vec<AuditAdvisory> = Vec::new();
+
+    if let Some(vulns) = json.get("vulnerabilities").and_then(|v| v.as_object()) {
+        let text = |value: &serde_json::Value, key: &str| {
+            value
+                .get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let mut seen = std::collections::HashSet::new();
+        for (name, entry) in vulns {
+            let Some(via) = entry.get("via").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for item in via.iter().filter(|v| v.is_object()) {
+                let package = match text(item, "name") {
+                    own if own.is_empty() => name.clone(),
+                    own => own,
+                };
+                let title = text(item, "title");
+                let id = match item.get("source").and_then(|v| v.as_u64()) {
+                    Some(source) => source.to_string(),
+                    None => format!("{package}:{title}"),
+                };
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                let severity = match text(item, "severity") {
+                    own if own.is_empty() => match text(entry, "severity") {
+                        parent if parent.is_empty() => "unknown".to_string(),
+                        parent => parent,
+                    },
+                    own => own,
+                };
+                let range = match text(item, "range") {
+                    own if own.is_empty() => text(entry, "range"),
+                    own => own,
+                };
+                let cwe = item
+                    .get("cwe")
+                    .and_then(|v| v.as_array())
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|c| c.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // The packages reached through `effects`, nearest first.
+                let mut affected = Vec::new();
+                let mut visited = std::collections::HashSet::new();
+                visited.insert(package.clone());
+                let mut queue = std::collections::VecDeque::new();
+                let start = vulns.get(&package).unwrap_or(entry);
+                queue.push_back(start);
+                while let Some(current) = queue.pop_front() {
+                    let Some(effects) = current.get("effects").and_then(|v| v.as_array()) else {
+                        continue;
+                    };
+                    for effect in effects.iter().filter_map(|v| v.as_str()) {
+                        if !visited.insert(effect.to_string()) {
+                            continue;
+                        }
+                        let Some(reached) = vulns.get(effect) else {
+                            continue;
+                        };
+                        affected.push(AuditAffected {
+                            package: effect.to_string(),
+                            severity: match text(reached, "severity") {
+                                s if s.is_empty() => "unknown".to_string(),
+                                s => s,
+                            },
+                            is_direct: reached
+                                .get("isDirect")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                            location: reached
+                                .get("nodes")
+                                .and_then(|v| v.as_array())
+                                .and_then(|nodes| nodes.first())
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            fix: audit_fix(reached),
+                        });
+                        queue.push_back(reached);
+                    }
+                }
+
+                let own_entry = vulns.get(&package).unwrap_or(entry);
+                let mut direct_via = Vec::new();
+                if own_entry
+                    .get("isDirect")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    direct_via.push(package.clone());
+                }
+                direct_via.extend(
+                    affected
+                        .iter()
+                        .filter(|a| a.is_direct)
+                        .map(|a| a.package.clone()),
+                );
+
+                out.push(AuditAdvisory {
+                    id,
+                    package,
+                    severity,
+                    title,
+                    url: text(item, "url"),
+                    cwe,
+                    range,
+                    fix: audit_fix(own_entry),
+                    affected,
+                    direct_via,
+                });
+            }
+        }
+    }
+
+    // Legacy shape (npm 6): one advisory per entry, nothing about what it reaches.
+    if let Some(advs) = json.get("advisories").and_then(|v| v.as_object()) {
+        for (id, entry) in advs {
+            let Some(package) = entry.get("module_name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let version = entry
+                .get("fixed_in")
+                .or_else(|| entry.get("patched_versions"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let field = |key: &str| {
+                entry
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            out.push(AuditAdvisory {
+                id: id.clone(),
+                package: package.to_string(),
+                severity: match field("severity") {
+                    s if s.is_empty() => "unknown".to_string(),
+                    s => s,
+                },
+                title: field("title"),
+                url: field("url"),
+                cwe: Vec::new(),
+                range: field("vulnerable_versions"),
+                fix: match version {
+                    Some(v) => AuditFix::Available(Some(v)),
+                    None => AuditFix::None,
+                },
+                affected: Vec::new(),
+                direct_via: Vec::new(),
+            });
+        }
+    }
+
+    out.sort_by(|a, b| {
+        severity_rank(&b.severity)
+            .cmp(&severity_rank(&a.severity))
+            .then_with(|| a.package.cmp(&b.package))
+    });
+    Ok(out)
+}
+
+/// The GitHub advisory id (`GHSA-xxxx-xxxx-xxxx`) in an advisory link, when the
+/// link is one. The id is checked closely because it is put into a request URL.
+pub fn ghsa_id(url: &str) -> Option<String> {
+    let id = url.trim().trim_end_matches('/').rsplit('/').next()?;
+    let rest = id.strip_prefix("GHSA-")?;
+    let groups: Vec<&str> = rest.split('-').collect();
+    let well_formed = groups.len() == 3
+        && groups.iter().all(|g| {
+            g.len() == 4
+                && g.bytes()
+                    .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase())
+        });
+    well_formed.then(|| id.to_string())
+}
+
+/// The written advisory GitHub publishes: what `npm audit` leaves out.
+#[derive(serde::Serialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdvisoryText {
+    pub summary: String,
+    /// Markdown.
+    pub description: String,
+    /// The day it was published, `YYYY-MM-DD`.
+    pub published: String,
+    /// The first version of each affected package that has the fix.
+    pub patched: Vec<String>,
+    pub references: Vec<String>,
+}
+
+/// Reads GitHub's `GET /advisories/{ghsa_id}` response.
+pub fn parse_github_advisory(json: &serde_json::Value) -> Result<AdvisoryText, String> {
+    let text = |key: &str| {
+        json.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let (summary, description) = (text("summary"), text("description"));
+    if summary.is_empty() && description.is_empty() {
+        return Err("the advisory has no text".to_string());
+    }
+    let patched = json
+        .get("vulnerabilities")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| {
+                    let fixed = v.get("first_patched_version")?;
+                    // A string in the REST API; an object with `identifier` elsewhere.
+                    let version = fixed
+                        .as_str()
+                        .or_else(|| fixed.get("identifier").and_then(|i| i.as_str()))?;
+                    let package = v
+                        .get("package")
+                        .and_then(|p| p.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("");
+                    (!version.is_empty()).then(|| {
+                        if package.is_empty() {
+                            version.to_string()
+                        } else {
+                            format!("{package} {version}")
+                        }
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let references = json
+        .get("references")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|r| r.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(AdvisoryText {
+        summary,
+        description,
+        published: text("published_at").chars().take(10).collect(),
+        patched,
+        references,
+    })
+}
+
+/// The advisory as one markdown document, for the markdown widget.
+pub fn advisory_markdown(advisory: &AdvisoryText) -> String {
+    let mut out = String::new();
+    if !advisory.summary.is_empty() {
+        out.push_str(&format!("## {}\n\n", advisory.summary.trim()));
+    }
+    if !advisory.published.is_empty() {
+        out.push_str(&format!("_Published {}_\n\n", advisory.published));
+    }
+    if !advisory.description.trim().is_empty() {
+        out.push_str(advisory.description.trim());
+        out.push_str("\n\n");
+    }
+    if !advisory.patched.is_empty() {
+        out.push_str("### Patched versions\n\n");
+        for version in &advisory.patched {
+            out.push_str(&format!("- `{version}`\n"));
+        }
+        out.push('\n');
+    }
+    if !advisory.references.is_empty() {
+        out.push_str("### References\n\n");
+        for reference in &advisory.references {
+            out.push_str(&format!("- <{reference}>\n"));
+        }
+    }
+    out.trim_end().to_string()
 }
 
 // ── Registry parsing (npmjs.org search, packuments, downloads) ────────
@@ -928,6 +1351,169 @@ mod tests {
         assert_eq!(vulns[0].url, "https://example.test/1523");
         assert_eq!(vulns[0].exploitability, None);
         assert_eq!(vulns[0].fixed_in.as_deref(), Some(">=1.2.3"));
+    }
+
+    /// A small audit shaped like a real one: an advisory on `glob`, reached by
+    /// `jest-config` (indirect) and `@jest/core` (the project's own).
+    fn advisory_audit() -> String {
+        json!({
+            "vulnerabilities": {
+                "glob": {
+                    "name": "glob", "severity": "moderate", "isDirect": false,
+                    "via": [
+                        { "source": 1244013, "name": "glob", "title": "Glob traversal",
+                          "url": "https://example.test/glob", "severity": "moderate",
+                          "cwe": ["CWE-400"], "range": ">=9.0.0 <=14.0.1" },
+                        "minimatch"
+                    ],
+                    "effects": ["jest-config"],
+                    "range": "9.0.0 - 14.0.1",
+                    "nodes": ["node_modules/glob"],
+                    "fixAvailable": true
+                },
+                "jest-config": {
+                    "name": "jest-config", "severity": "moderate", "isDirect": false,
+                    "via": ["glob"], "effects": ["@jest/core"],
+                    "nodes": ["node_modules/jest-config"],
+                    "fixAvailable": { "name": "jest", "version": "30.0.0", "isSemVerMajor": true }
+                },
+                "@jest/core": {
+                    "name": "@jest/core", "severity": "moderate", "isDirect": true,
+                    "via": ["jest-config"], "effects": [],
+                    "nodes": ["node_modules/@jest/core"],
+                    "fixAvailable": true
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn advisories_group_by_advisory_and_walk_effects() {
+        let advisories = parse_audit_advisories(&advisory_audit()).unwrap();
+        // Three flagged packages, one advisory.
+        assert_eq!(advisories.len(), 1);
+        let glob = &advisories[0];
+        assert_eq!(glob.id, "1244013");
+        assert_eq!(glob.package, "glob");
+        assert_eq!(glob.title, "Glob traversal");
+        assert_eq!(glob.url, "https://example.test/glob");
+        assert_eq!(glob.cwe, vec!["CWE-400".to_string()]);
+        assert_eq!(glob.range, ">=9.0.0 <=14.0.1");
+        assert_eq!(glob.fix, AuditFix::Available(None));
+
+        // Nearest first: jest-config, then what depends on that.
+        let reached: Vec<_> = glob.affected.iter().map(|a| a.package.as_str()).collect();
+        assert_eq!(reached, vec!["jest-config", "@jest/core"]);
+        assert!(!glob.affected[0].is_direct);
+        assert_eq!(glob.affected[0].location, "node_modules/jest-config");
+        assert_eq!(
+            glob.affected[0].fix,
+            AuditFix::Breaking(Some("30.0.0".to_string()))
+        );
+        assert!(glob.affected[1].is_direct);
+
+        // What to upgrade: the project's own dependency in the chain.
+        assert_eq!(glob.direct_via, vec!["@jest/core".to_string()]);
+    }
+
+    #[test]
+    fn advisories_sort_by_severity_and_survive_a_cycle() {
+        let raw = json!({
+            "vulnerabilities": {
+                "a": { "severity": "low", "isDirect": true,
+                       "via": [{ "source": 1, "name": "a", "title": "A" }],
+                       "effects": ["b"], "fixAvailable": false },
+                "b": { "severity": "high", "isDirect": false,
+                       "via": [{ "source": 2, "name": "b", "title": "B", "severity": "high" }, "a"],
+                       "effects": ["a"] }
+            }
+        })
+        .to_string();
+        let advisories = parse_audit_advisories(&raw).unwrap();
+        let order: Vec<_> = advisories.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(order, vec!["2", "1"], "high before low");
+        // The loop a -> b -> a ends, and `a` is not listed as affected by itself.
+        assert_eq!(advisories[1].affected.len(), 1);
+        assert_eq!(advisories[1].affected[0].package, "b");
+        assert_eq!(advisories[1].fix, AuditFix::None);
+        assert_eq!(advisories[1].direct_via, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn advisories_for_the_legacy_shape_and_clean_output() {
+        let legacy = json!({ "advisories": { "1523": {
+            "module_name": "minimist", "severity": "low", "title": "Pollution",
+            "url": "https://example.test/1523", "patched_versions": ">=1.2.3"
+        } } })
+        .to_string();
+        let advisories = parse_audit_advisories(&legacy).unwrap();
+        assert_eq!(advisories.len(), 1);
+        assert_eq!(advisories[0].id, "1523");
+        assert_eq!(
+            advisories[0].fix,
+            AuditFix::Available(Some(">=1.2.3".into()))
+        );
+        assert!(advisories[0].affected.is_empty());
+
+        assert!(
+            parse_audit_advisories(r#"{"vulnerabilities":{}}"#)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(parse_audit_advisories("npm ERR!").is_err());
+    }
+
+    #[test]
+    fn the_advisory_id_is_taken_from_a_github_link_only() {
+        assert_eq!(
+            ghsa_id("https://github.com/advisories/GHSA-3g3m-2fjr-6pw4").as_deref(),
+            Some("GHSA-3g3m-2fjr-6pw4")
+        );
+        assert_eq!(
+            ghsa_id("https://github.com/advisories/GHSA-3g3m-2fjr-6pw4/").as_deref(),
+            Some("GHSA-3g3m-2fjr-6pw4")
+        );
+        // Anything that could change the request URL is refused.
+        for bad in [
+            "",
+            "https://example.test/advisories/1234",
+            "https://github.com/advisories/GHSA-3g3m-2fjr",
+            "https://github.com/advisories/GHSA-3g3m-2fjr-6pw4?x=1",
+            "https://github.com/advisories/GHSA-3G3M-2FJR-6PW4",
+            "https://github.com/advisories/GHSA-3g3m-2fjr-6pw4/../x",
+        ] {
+            assert_eq!(ghsa_id(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_github_advisory_becomes_markdown() {
+        let json = json!({
+            "ghsa_id": "GHSA-3g3m-2fjr-6pw4",
+            "summary": "Glob traversal",
+            "description": "### Summary\n\nAn aborted walk keeps reading.",
+            "published_at": "2026-05-12T09:30:00Z",
+            "vulnerabilities": [
+                { "package": { "name": "glob" }, "first_patched_version": "14.0.2" },
+                { "package": { "name": "other" }, "first_patched_version": null }
+            ],
+            "references": ["https://example.test/a", "https://example.test/b"]
+        });
+        let advisory = parse_github_advisory(&json).unwrap();
+        assert_eq!(advisory.published, "2026-05-12");
+        assert_eq!(advisory.patched, vec!["glob 14.0.2".to_string()]);
+        let md = advisory_markdown(&advisory);
+        assert!(md.starts_with("## Glob traversal\n\n_Published 2026-05-12_\n\n### Summary"));
+        assert!(md.contains("### Patched versions\n\n- `glob 14.0.2`"));
+        assert!(md.ends_with("- <https://example.test/b>"));
+    }
+
+    #[test]
+    fn an_advisory_without_text_is_an_error() {
+        assert!(parse_github_advisory(&json!({})).is_err());
+        let only_summary = parse_github_advisory(&json!({ "summary": "S" })).unwrap();
+        assert_eq!(advisory_markdown(&only_summary), "## S");
     }
 
     #[test]

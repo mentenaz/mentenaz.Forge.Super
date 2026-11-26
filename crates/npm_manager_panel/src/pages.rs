@@ -12,10 +12,13 @@
 //! every installed / outdated / audit / search row the way the old
 //! `build_*_page` functions did.
 
+use std::collections::{HashMap, HashSet};
+
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Hsla, InteractiveElement as _,
-    IntoElement, MouseButton, ParentElement as _, Render, StatefulInteractiveElement as _,
-    Styled as _, WeakEntity, Window, div, prelude::FluentBuilder as _,
+    AnyElement, App, AppContext as _, AsyncApp, ClipboardItem, Context, Entity, FocusHandle,
+    FontWeight, Hsla, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _,
+    Render, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, Size, StyledExt as _,
@@ -24,10 +27,21 @@ use gpui_component::{
     input::Input,
     setting::{SettingGroup, SettingItem, SettingPage},
     spinner::Spinner,
+    table::{DataTable, TableState},
+    tag::Tag,
+    text::TextView,
     v_flex,
 };
-use npm_backend::{PackageManager, UpdateKind, Verdict, classify_update};
+use npm_backend::{
+    AuditAdvisory, AuditFix, AuditReport, PackageManager, UpdateKind, Verdict, advisory_markdown,
+    classify_update, ghsa_id, parse_github_advisory,
+};
 
+use crate::audit_card::{
+    AdvisoryState, AffectedDelegate, fix_label, friendly_fetch_error, is_direct, is_plain_fix,
+    severity_color, table_height, via_label,
+};
+use crate::search::fetch_json;
 use crate::{
     ActSelectedPackage, NpmManagerPanel, OpenSelectedPackage, SelectNextPackage, SelectPrevPackage,
 };
@@ -1230,11 +1244,41 @@ fn build_updates_page(project: &crate::NpmProject, pages: &PageViews) -> Setting
 
 // ── Vulnerabilities ────────────────────────────────────────────────────────
 
+/// The command a plain fix runs: everything `npm audit` can fix without a
+/// breaking upgrade, not only one advisory.
+const AUDIT_FIX_ARGS: [&str; 2] = ["audit", "fix"];
+/// What a breaking fix would take. It is only offered to copy, never run here.
+const AUDIT_FIX_FORCE: &str = "npm audit fix --force";
+
 pub(super) struct VulnPage {
     panel: WeakEntity<NpmManagerPanel>,
     focus_handle: FocusHandle,
-    /// Index into `project.audit` — see `InstalledPage::selected`.
+    /// Index into the cards on show: the production ones, then the dev ones
+    /// when those are expanded.
     selected: Option<usize>,
+    /// Whether the dev advisories are shown. The page opens on production only.
+    show_dev: bool,
+    /// One table of affected packages per advisory with any, built once and kept
+    /// between frames (`prod:<id>` / `dev:<id>`).
+    tables: HashMap<String, Entity<TableState<AffectedDelegate>>>,
+    /// What `tables` was built for: each advisory's key and how many it reaches.
+    tables_for: Vec<(String, usize)>,
+    /// GitHub advisory ids whose written text is expanded in its card.
+    text_open: HashSet<String>,
+    /// The written advisories fetched so far, by GitHub id. Kept for the session,
+    /// so reading one again costs no request.
+    texts: HashMap<String, AdvisoryState>,
+}
+
+/// The advisories on show, in order, each with whether it is a dev one.
+fn shown(report: &AuditReport, show_dev: bool) -> Vec<(&AuditAdvisory, bool)> {
+    let production = report.production.iter().map(|a| (a, false));
+    let dev = report.dev.iter().filter(|_| show_dev).map(|a| (a, true));
+    production.chain(dev).collect()
+}
+
+fn table_key(advisory: &AuditAdvisory, dev: bool) -> String {
+    format!("{}:{}", if dev { "dev" } else { "prod" }, advisory.id)
 }
 
 impl VulnPage {
@@ -1243,27 +1287,74 @@ impl VulnPage {
             panel,
             focus_handle: cx.focus_handle(),
             selected: None,
+            show_dev: false,
+            tables: HashMap::new(),
+            tables_for: Vec::new(),
+            text_open: HashSet::new(),
+            texts: HashMap::new(),
         }
     }
 
-    fn select_next(&mut self, _: &SelectNextPackage, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.panel.upgrade() else {
+    /// Opens or closes an advisory's written text, fetching it the first time
+    /// (and again after a failure).
+    fn toggle_text(&mut self, ghsa: String, cx: &mut Context<Self>) {
+        if self.text_open.remove(&ghsa) {
+            cx.notify();
             return;
+        }
+        self.text_open.insert(ghsa.clone());
+        let have = matches!(
+            self.texts.get(&ghsa),
+            Some(AdvisoryState::Ready(_) | AdvisoryState::Loading)
+        );
+        if !have {
+            self.texts.insert(ghsa.clone(), AdvisoryState::Loading);
+            let http_client = cx.http_client();
+            let url = format!("https://api.github.com/advisories/{ghsa}");
+            let this = cx.weak_entity();
+            cx.spawn(async move |_: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let outcome = fetch_json(&http_client, &url)
+                    .await
+                    .and_then(|json| parse_github_advisory(&json))
+                    .map(|advisory| advisory_markdown(&advisory));
+                let _ = cx.update(|app| {
+                    if let Some(page) = this.upgrade() {
+                        let _ = page.update(app, |page, cx| {
+                            let state = match outcome {
+                                Ok(markdown) => AdvisoryState::Ready(markdown),
+                                Err(error) => AdvisoryState::Failed(friendly_fetch_error(&error)),
+                            };
+                            page.texts.insert(ghsa, state);
+                            cx.notify();
+                        });
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    fn shown_count(&self, cx: &App) -> usize {
+        let Some(view) = self.panel.upgrade() else {
+            return 0;
         };
-        let len = view.read(cx).active().audit.len();
+        shown(&view.read(cx).active().audit, self.show_dev).len()
+    }
+
+    fn select_next(&mut self, _: &SelectNextPackage, _window: &mut Window, cx: &mut Context<Self>) {
+        let len = self.shown_count(cx);
         self.selected = step_selected(self.selected, len, true);
         cx.notify();
     }
 
     fn select_prev(&mut self, _: &SelectPrevPackage, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(view) = self.panel.upgrade() else {
-            return;
-        };
-        let len = view.read(cx).active().audit.len();
+        let len = self.shown_count(cx);
         self.selected = step_selected(self.selected, len, false);
         cx.notify();
     }
 
+    /// Enter: the details of the selected advisory's package.
     fn open_selected(
         &mut self,
         _: &OpenSelectedPackage,
@@ -1273,20 +1364,18 @@ impl VulnPage {
         let Some(view) = self.panel.upgrade() else {
             return;
         };
-        let Some(package) = self
-            .selected
-            .and_then(|ix| view.read(cx).active().audit.get(ix))
-            .map(|vuln| vuln.package.clone())
-        else {
+        let Some(package) = self.selected.and_then(|ix| {
+            shown(&view.read(cx).active().audit, self.show_dev)
+                .get(ix)
+                .map(|(advisory, _)| advisory.package.clone())
+        }) else {
             return;
         };
         view.update(cx, |panel, cx| panel.fetch_details(package, cx));
     }
 
-    /// Space's action on this page: Fix (update to the version the advisory
-    /// names) — only when one is offered, exactly like the Fix button, which
-    /// this mirrors; a no-op otherwise rather than falling back to something
-    /// the row didn't offer.
+    /// Space: run the fix, when the selected advisory has one `npm audit fix`
+    /// can apply; a no-op otherwise rather than something the card did not offer.
     fn act_on_selected(
         &mut self,
         _: &ActSelectedPackage,
@@ -1296,35 +1385,344 @@ impl VulnPage {
         let Some(view) = self.panel.upgrade() else {
             return;
         };
-        let Some((package, version)) = self.selected.and_then(|ix| {
-            let vuln = view.read(cx).active().audit.get(ix)?;
-            Some((vuln.package.clone(), vuln.fixed_in.clone()?))
-        }) else {
+        let plain = self.selected.is_some_and(|ix| {
+            shown(&view.read(cx).active().audit, self.show_dev)
+                .get(ix)
+                .is_some_and(|(advisory, _)| is_plain_fix(&advisory.fix))
+        });
+        if plain {
+            self.run_audit_fix(window, cx);
+        }
+    }
+
+    fn run_audit_fix(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.panel.upgrade() else {
             return;
         };
         view.update(cx, |panel, cx| {
-            panel.update_pkg(&package, &version, window, cx)
+            let args = AUDIT_FIX_ARGS.iter().map(|a| a.to_string()).collect();
+            panel.run_checked("audit fix", Ok(args), window, cx);
         });
+    }
+
+    /// Builds the table of every advisory's affected packages again, when the
+    /// advisories are not the ones the tables were made for.
+    fn refresh_tables(
+        &mut self,
+        report: &AuditReport,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let all = || {
+            report
+                .production
+                .iter()
+                .map(|a| (a, false))
+                .chain(report.dev.iter().map(|a| (a, true)))
+        };
+        let signature: Vec<(String, usize)> = all()
+            .map(|(a, dev)| (table_key(a, dev), a.affected.len()))
+            .collect();
+        if signature == self.tables_for {
+            return;
+        }
+        self.tables.clear();
+        for (advisory, dev) in all() {
+            if advisory.affected.is_empty() {
+                continue;
+            }
+            let delegate = AffectedDelegate::new(advisory.affected.clone());
+            let table = cx.new(|cx| TableState::new(delegate, window, cx));
+            self.tables.insert(table_key(advisory, dev), table);
+        }
+        self.tables_for = signature;
+    }
+
+    /// One advisory: who it is about, what it is, what it reaches, and what fixes it.
+    fn render_card(
+        &self,
+        ix: usize,
+        advisory: &AuditAdvisory,
+        dev: bool,
+        view: &Entity<NpmManagerPanel>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let (border, foreground, muted, primary, success, warning, danger) = (
+            theme.border,
+            theme.foreground,
+            theme.muted_foreground,
+            theme.primary,
+            theme.success,
+            theme.warning,
+            theme.danger,
+        );
+        // The advisory's GitHub id, when its link is one; only those can be read here.
+        let ghsa = ghsa_id(&advisory.url);
+        let text_open = ghsa.as_ref().is_some_and(|id| self.text_open.contains(id));
+        let tint = severity_color(theme, &advisory.severity);
+        let is_selected = self.selected == Some(ix);
+        let package = advisory.package.clone();
+
+        let header = h_flex()
+            .gap_2()
+            .items_center()
+            .w_full()
+            .child(
+                div()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(tint.opacity(0.2))
+                    .text_color(tint)
+                    .text_xs()
+                    .child(advisory.severity.clone()),
+            )
+            .child(
+                div()
+                    .id(("npm-vuln-package", ix))
+                    .flex_none()
+                    .cursor_pointer()
+                    .font_family("Cascadia Mono")
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_sm()
+                    .text_color(foreground)
+                    .child(package.clone())
+                    .on_click({
+                        let view = view.clone();
+                        let package = package.clone();
+                        move |_, _window, cx| {
+                            view.update(cx, |panel, cx| {
+                                panel.fetch_details(package.clone(), cx);
+                            });
+                        }
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(via_label(advisory).unwrap_or_default()),
+            )
+            .child(Tag::secondary().xsmall().child(if is_direct(advisory) {
+                "direct"
+            } else {
+                "indirect"
+            }))
+            .when(dev, |row| row.child(Tag::secondary().xsmall().child("dev")));
+
+        let facts = h_flex()
+            .gap_3()
+            .items_center()
+            .flex_wrap()
+            .text_xs()
+            .text_color(muted)
+            .when(!advisory.range.is_empty(), |row| {
+                row.child(format!("Vulnerable: {}", advisory.range))
+            })
+            .when(!advisory.cwe.is_empty(), |row| {
+                row.child(advisory.cwe.join(", "))
+            })
+            .when(!advisory.url.is_empty(), |row| {
+                let url = advisory.url.clone();
+                match ghsa.clone() {
+                    // Read in the card, without a browser.
+                    Some(ghsa) => row.child(
+                        Button::new(("npm-vuln-read", ix))
+                            .ghost()
+                            .xsmall()
+                            .label(if text_open {
+                                "Hide advisory"
+                            } else {
+                                "Read advisory"
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_text(ghsa.clone(), cx);
+                            })),
+                    ),
+                    // Not a GitHub advisory: only its page can be opened.
+                    None => row.child(
+                        Button::new(("npm-vuln-link", ix))
+                            .ghost()
+                            .xsmall()
+                            .label("View advisory")
+                            .on_click(move |_, _window, cx| cx.open_url(&url)),
+                    ),
+                }
+            });
+
+        // The written advisory, once asked for.
+        let written = ghsa.as_ref().filter(|_| text_open).map(|ghsa| {
+            let url = advisory.url.clone();
+            let body = match self.texts.get(ghsa) {
+                Some(AdvisoryState::Ready(text)) => div()
+                    .id(("npm-vuln-text", ix))
+                    .w_full()
+                    .max_h(px(360.))
+                    .overflow_y_scroll()
+                    .child(
+                        // An id of its own: the plain `markdown()` helper takes
+                        // its id from the call site, which every card shares.
+                        TextView::markdown(format!("npm-vuln-md-{ghsa}"), text.clone())
+                            .selectable(true),
+                    )
+                    .into_any_element(),
+                Some(AdvisoryState::Failed(error)) => v_flex()
+                    .gap_1()
+                    .child(div().text_xs().text_color(danger).child(error.clone()))
+                    .child(
+                        Button::new(("npm-vuln-browser", ix))
+                            .ghost()
+                            .xsmall()
+                            .label("Open in browser")
+                            .on_click(move |_, _window, cx| cx.open_url(&url)),
+                    )
+                    .into_any_element(),
+                _ => h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(Spinner::new().xsmall())
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("Loading the advisory\u{2026}"),
+                    )
+                    .into_any_element(),
+            };
+            div()
+                .w_full()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(border)
+                .child(body)
+        });
+
+        let affected = self
+            .tables
+            .get(&table_key(advisory, dev))
+            .filter(|_| !advisory.affected.is_empty())
+            .map(|table| {
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child(format!("Also affects ({})", advisory.affected.len())),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(table_height(advisory.affected.len())))
+                            .child(
+                                DataTable::new(table)
+                                    .small()
+                                    .stripe(true)
+                                    .bordered(true)
+                                    .scrollbar_visible(true, false),
+                            ),
+                    )
+            });
+
+        let fix_color = match &advisory.fix {
+            AuditFix::Available(_) => success,
+            AuditFix::Breaking(_) => warning,
+            AuditFix::None => muted,
+        };
+        let footer = h_flex()
+            .gap_2()
+            .items_center()
+            .w_full()
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(fix_color)
+                    .child(fix_label(&advisory.fix)),
+            )
+            .when(matches!(advisory.fix, AuditFix::Breaking(_)), |row| {
+                row.child(
+                    Button::new(("npm-vuln-copy-force", ix))
+                        .ghost()
+                        .xsmall()
+                        .label("Copy the forced command")
+                        .tooltip(format!(
+                            "{AUDIT_FIX_FORCE}: it can break the build, so it is not run from here"
+                        ))
+                        .on_click(|_, _window, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                AUDIT_FIX_FORCE.to_string(),
+                            ));
+                        }),
+                )
+            });
+
+        v_flex()
+            .id(("npm-vuln-card", ix))
+            .w_full()
+            .gap_2()
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(if is_selected { primary } else { border })
+            .when(is_selected, |card| card.bg(primary.opacity(0.08)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.selected = Some(ix);
+                cx.notify();
+            }))
+            .child(header)
+            .when(!advisory.title.is_empty(), |card| {
+                card.child(
+                    div()
+                        .text_sm()
+                        .text_color(foreground)
+                        .child(advisory.title.clone()),
+                )
+            })
+            .child(facts)
+            .children(written)
+            .children(affected)
+            .child(footer)
+            .into_any_element()
     }
 }
 
 impl Render for VulnPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(view) = self.panel.upgrade() else {
             return div().into_any_element();
         };
-        let panel = view.read(cx);
-        let theme = cx.theme();
-        let project = panel.active();
-        let audit = &project.audit;
-        let audit_loading = project.audit_loading;
-
-        if audit_loading {
+        let (report, loading, error, npm) = {
+            let panel = view.read(cx);
+            let project = panel.active();
+            (
+                project.audit.clone(),
+                project.audit_loading,
+                project.audit_error.clone(),
+                project.package_manager.cli_name() == "npm",
+            )
+        };
+        if loading {
             return div().into_any_element();
         }
+        self.refresh_tables(&report, window, cx);
 
-        let selected = self.selected;
-        let mut list = v_flex()
+        let (danger, success, muted, foreground) = {
+            let theme = cx.theme();
+            (
+                theme.danger,
+                theme.success,
+                theme.muted_foreground,
+                theme.foreground,
+            )
+        };
+        let mut page = v_flex()
             .id("npm-vuln-list")
             .track_focus(&self.focus_handle)
             .on_mouse_down(
@@ -1338,118 +1736,173 @@ impl Render for VulnPage {
             .on_action(cx.listener(Self::select_prev))
             .on_action(cx.listener(Self::open_selected))
             .on_action(cx.listener(Self::act_on_selected))
-            .gap_1p5();
-        if audit.is_empty() {
-            list = list.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.success)
-                    .child("No known vulnerabilities for this package set."),
-            );
-        } else {
-            for (ix, vuln) in audit.iter().enumerate() {
-                let package = vuln.package.clone();
-                let severity = vuln.severity.clone();
-                let title = vuln.title.clone();
-                let fixed_in = vuln.fixed_in.clone();
-                let is_selected = selected == Some(ix);
-                let severity_color = match severity.as_str() {
-                    "critical" | "high" => theme.danger,
-                    "moderate" => theme.warning,
-                    _ => theme.muted_foreground,
-                };
-                let mut row = h_flex()
-                    .id(("npm-vuln-row", ix))
+            .gap_3();
+
+        // A scan that failed says so; it never reads as a clean project.
+        if let Some(error) = error {
+            page = page.child(
+                h_flex()
                     .gap_2()
                     .items_center()
                     .w_full()
-                    .rounded_md()
-                    .when(is_selected, |row| {
-                        row.bg(theme.primary.opacity(0.08))
-                            .border_1()
-                            .border_color(theme.primary)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.selected = Some(ix);
-                        cx.notify();
-                    }))
                     .child(
                         div()
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded_md()
-                            .bg(severity_color.opacity(0.2))
-                            .text_color(severity_color)
+                            .flex_1()
                             .text_xs()
-                            .child(severity.clone()),
+                            .text_color(danger)
+                            .child(format!("The audit failed: {error}")),
                     )
                     .child(
-                        div()
-                            .id(format!("npm-vuln-{package}"))
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .cursor_pointer()
-                            .text_xs()
-                            .text_color(theme.foreground)
-                            .child(package.clone())
+                        Button::new("npm-vuln-retry")
+                            .secondary()
+                            .xsmall()
+                            .label("Retry")
                             .on_click({
                                 let view = view.clone();
-                                let package = package.clone();
                                 move |_, _window, cx| {
-                                    view.update(cx, |panel, cx| {
-                                        panel.fetch_details(package.clone(), cx);
-                                    });
+                                    view.update(cx, |panel, cx| panel.reload_visible(cx));
                                 }
                             }),
-                    )
+                    ),
+            );
+            return page.into_any_element();
+        }
+
+        let none_at_all =
+            report.production.is_empty() && report.dev.is_empty() && report.dev_error.is_none();
+        if none_at_all {
+            return page
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(success)
+                        .child("No known vulnerabilities for this package set."),
+                )
+                .into_any_element();
+        }
+
+        // One button for every fix `npm audit fix` can make without a breaking change.
+        let fixable = report
+            .production
+            .iter()
+            .chain(report.dev.iter())
+            .filter(|a| is_plain_fix(&a.fix))
+            .count();
+        if npm && fixable > 0 {
+            page = page.child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .w_full()
+                    .child(div().flex_1().text_xs().text_color(muted).child(format!(
+                        "{fixable} can be fixed without breaking changes. This runs \
+                                 `npm audit fix` for the whole project."
+                    )))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(title.clone()),
-                    );
-                if let Some(version) = &fixed_in {
-                    row = row.child(
-                        Button::new(format!("npm-fix-{package}"))
+                        Button::new("npm-vuln-fix-all")
                             .primary()
-                            .label(format!("Fix → {version}"))
-                            .with_size(Size::Small)
-                            .on_click({
-                                let view = view.clone();
-                                let package = package.clone();
-                                let version = version.clone();
-                                move |_, window, cx| {
-                                    view.update(cx, |panel, cx| {
-                                        panel.update_pkg(&package, &version, window, cx);
-                                    });
-                                }
-                            }),
-                    );
-                }
-                list = list.child(row);
+                            .small()
+                            .label("Run npm audit fix")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.run_audit_fix(window, cx);
+                            })),
+                    ),
+            );
+        }
+
+        let heading = |title: String| {
+            div()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(foreground)
+                .child(title)
+        };
+
+        // Production: what ships.
+        page = page.child(heading(format!("Production ({})", report.production.len())));
+        if report.production.is_empty() {
+            page = page.child(
+                div()
+                    .text_xs()
+                    .text_color(success)
+                    .child("None in what ships."),
+            );
+        }
+        let mut ix = 0;
+        for advisory in &report.production {
+            page = page.child(self.render_card(ix, advisory, false, &view, cx));
+            ix += 1;
+        }
+
+        // Dev dependencies: collapsed until asked for.
+        if !report.dev.is_empty() || report.dev_error.is_some() {
+            let label = if self.show_dev {
+                format!("Hide dev dependencies ({})", report.dev.len())
+            } else {
+                format!("Show dev dependencies ({})", report.dev.len())
+            };
+            page = page.child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .w_full()
+                    .child(
+                        Button::new("npm-vuln-toggle-dev")
+                            .secondary()
+                            .small()
+                            .label(label)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show_dev = !this.show_dev;
+                                this.selected = None;
+                                cx.notify();
+                            })),
+                    )
+                    .when_some(report.dev_error.clone(), |row, error| {
+                        row.child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(danger)
+                                .child(format!("The dev scan failed: {error}")),
+                        )
+                    }),
+            );
+        }
+        if self.show_dev {
+            for advisory in &report.dev {
+                page = page.child(self.render_card(ix, advisory, true, &view, cx));
+                ix += 1;
             }
         }
-        list.into_any_element()
+        page.into_any_element()
     }
 }
 
 fn build_vuln_page(project: &crate::NpmProject, pages: &PageViews) -> SettingPage {
-    let count = project.audit.len();
+    let count = project.audit.production.len() + project.audit.dev.len();
+    let production = !project.audit.production.is_empty();
     let loading = project.audit_loading;
     SettingPage::new("Vulnerabilities")
         .resettable(false)
         .icon(Icon::new(IconName::TriangleAlert))
-        .description("Findings from the latest `npm audit` run.")
+        .description(
+            "Findings from `npm audit`: what ships first, then dev dependencies. Click a \
+             package for its details.",
+        )
         .group(
             SettingGroup::new()
-                .title("npm audit findings")
+                .title("npm audit advisories")
                 .item(embed_view(pages.vuln.clone())),
         )
-        .sidebar_badge(move |_, cx| colored_count_badge(count, loading, cx.theme().danger))
+        .sidebar_badge(move |_, cx| {
+            // Red when something ships; grey when the findings are only in dev tooling.
+            let color = if production {
+                cx.theme().danger
+            } else {
+                cx.theme().muted_foreground
+            };
+            colored_count_badge(count, loading, color)
+        })
 }
 
 // ── Shared ─────────────────────────────────────────────────────────────────

@@ -143,7 +143,7 @@ async fn fetch_search(
     Ok((results, total))
 }
 
-async fn fetch_json(
+pub(crate) async fn fetch_json(
     http_client: &Arc<dyn HttpClient>,
     url: &str,
 ) -> Result<serde_json::Value, String> {

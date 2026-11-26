@@ -66,10 +66,10 @@ use node_backend::{
 pub use node_panel_settings::NodePanelSettings;
 use node_versions::{ChoiceSource, NodeChoice, NodeVersion, ProjectNode};
 use npm_backend::{
-    Detected, Detection, NodeRequirement, NpmAuditVuln, NpmInstalledPkg, NpmOutdatedPkg,
-    PackageManager, Source as PackageManagerSource, UpdateKind, classify_update,
-    detect_package_manager, list_audit_vulns, list_installed, list_outdated, node_requirement,
-    npm_range_matches,
+    AuditAdvisory, AuditReport, Detected, Detection, NodeRequirement, NpmAuditVuln,
+    NpmInstalledPkg, NpmOutdatedPkg, PackageManager, Source as PackageManagerSource, UpdateKind,
+    classify_update, detect_package_manager, list_audit_report, list_installed, list_outdated,
+    node_requirement, npm_range_matches,
 };
 use runtime_processes::ProcessList;
 use script_runner_panel::ScriptRunnerPanel;
@@ -298,6 +298,10 @@ pub struct NodePanel {
     installed_pkgs: Vec<NpmInstalledPkg>,
     outdated: PackagesState<NpmOutdatedPkg>,
     vulnerable: PackagesState<NpmAuditVuln>,
+    /// The same audit split by advisory into production and dev, for the
+    /// Vulnerabilities section. `vulnerable` is its production half, per package,
+    /// for the dashboard.
+    audit_report: Option<AuditReport>,
     /// Label of the bulk update action currently streaming in the Script
     /// Runner, if any — guards against piling a second run onto the first.
     running_action: Option<String>,
@@ -638,6 +642,7 @@ impl NodePanel {
                 installed_pkgs: Vec::new(),
                 outdated: PackagesState::Ready(Vec::new()),
                 vulnerable: PackagesState::Ready(Vec::new()),
+                audit_report: None,
                 running_action: None,
                 run_subscription: None,
                 scripts: None,
@@ -980,6 +985,7 @@ impl NodePanel {
                                     panel.installed_pkgs = Vec::new();
                                     panel.outdated = PackagesState::Ready(Vec::new());
                                     panel.vulnerable = PackagesState::Ready(Vec::new());
+                                    panel.audit_report = None;
                                     panel.spfx = SpfxInfo::default();
                                     panel.sppkg_files = Vec::new();
                                 }
@@ -1093,7 +1099,11 @@ impl NodePanel {
 
     /// Re-reads `sharepoint/solution` once the Script Runner finishes the
     /// command the panel just started: it reports running, then not.
-    fn rescan_sppkg_after_run(&mut self, runner: &Entity<ScriptRunnerPanel>, cx: &mut Context<Self>) {
+    fn rescan_sppkg_after_run(
+        &mut self,
+        runner: &Entity<ScriptRunnerPanel>,
+        cx: &mut Context<Self>,
+    ) {
         let mut saw_running = runner.read(cx).is_running();
         self._sppkg_after_run = Some(cx.observe(runner, move |this, runner, cx| {
             if runner.read(cx).is_running() {
@@ -1594,16 +1604,24 @@ impl NodePanel {
             let result = cx
                 .background_spawn(async move {
                     let cli = detect_package_manager(&dir).cli_name();
-                    list_audit_vulns(&dir, cli)
+                    list_audit_report(&dir, cli)
                 })
                 .await;
             cx.update(|app| {
                 if let Some(panel) = this.upgrade() {
                     panel.update(app, |panel, cx| {
-                        panel.vulnerable = match result {
-                            Ok(list) => PackagesState::Ready(list),
-                            Err(e) => PackagesState::Error(e),
-                        };
+                        match result {
+                            Ok(report) => {
+                                panel.vulnerable = PackagesState::Ready(
+                                    report.production.iter().map(NpmAuditVuln::from).collect(),
+                                );
+                                panel.audit_report = Some(report);
+                            }
+                            Err(e) => {
+                                panel.vulnerable = PackagesState::Error(e);
+                                panel.audit_report = None;
+                            }
+                        }
                         cx.notify();
                     });
                 }
@@ -1972,10 +1990,24 @@ fn init_discovery(cx: &mut Context<NodePanel>) {
 /// A collapsible section. `count` is the number of things it lists, shown
 /// in the header; `None` for a section that isn't a list, where a number
 /// would mean nothing.
+/// The `open` key of the Vulnerabilities section's dev group.
+const DEV_VULNERABILITIES: &str = "Vulnerabilities: dev";
+
 fn section_container(
     cx: &Context<NodePanel>,
     title: &str,
     count: Option<usize>,
+    open: bool,
+    body: impl IntoElement,
+) -> impl IntoElement {
+    section_container_labeled(cx, title, count.map(|count| count.to_string()), open, body)
+}
+
+/// A section whose tag is text rather than a number, such as "0 prod / 5 dev".
+fn section_container_labeled(
+    cx: &Context<NodePanel>,
+    title: &str,
+    label: Option<String>,
     open: bool,
     body: impl IntoElement,
 ) -> impl IntoElement {
@@ -2007,8 +2039,8 @@ fn section_container(
                 .text_color(cx.theme().foreground)
                 .child(title.to_string()),
         )
-        .when_some(count, |el, count| {
-            el.child(Tag::secondary().xsmall().child(count.to_string()))
+        .when_some(label, |el, label| {
+            el.child(Tag::secondary().xsmall().child(label))
         })
         .on_click(cx.listener(move |this, _e, _w, cx| {
             this.toggle(&key, cx);
@@ -2182,14 +2214,25 @@ impl Render for NodePanel {
             self.render_outdated(cx),
         );
 
-        let vulnerable_count = match &self.vulnerable {
-            PackagesState::Ready(list) => list.len(),
-            _ => 0,
+        // "0 prod / 5 dev". While scanning there is nothing to count yet, and
+        // after a failed scan "0" would read as a clean project.
+        let vulnerable_label = match (&self.vulnerable, &self.audit_report) {
+            (PackagesState::Ready(_), Some(report)) => Some(if report.dev_error.is_some() {
+                format!("{} prod / ? dev", report.production.len())
+            } else {
+                format!(
+                    "{} prod / {} dev",
+                    report.production.len(),
+                    report.dev.len()
+                )
+            }),
+            (PackagesState::Error(_), _) => Some("scan failed".to_string()),
+            _ => None,
         };
-        let vulnerabilities_section = section_container(
+        let vulnerabilities_section = section_container_labeled(
             cx,
             "Vulnerabilities",
-            Some(vulnerable_count),
+            vulnerable_label,
             self.is_open("Vulnerabilities", false),
             self.render_vulnerabilities(cx),
         );
@@ -3295,8 +3338,12 @@ impl NodePanel {
                         ),
                 );
             }
-            PackagesState::Ready(list) => {
-                if list.is_empty() {
+            PackagesState::Ready(_) => {
+                let report = self.audit_report.as_ref();
+                let none = report.is_none_or(|r| {
+                    r.production.is_empty() && r.dev.is_empty() && r.dev_error.is_none()
+                });
+                if none {
                     col = col.child(
                         div()
                             .px_3()
@@ -3305,57 +3352,177 @@ impl NodePanel {
                             .text_color(cx.theme().muted_foreground)
                             .child("No known vulnerabilities"),
                     );
-                } else {
-                    for vuln in list {
-                        // Same severity->color mapping `npm_manager_panel`'s
-                        // own Vulnerabilities page already established —
-                        // reused here rather than inventing a fourth scheme.
-                        let severity_color = match vuln.severity.as_str() {
-                            "critical" | "high" => cx.theme().danger,
-                            "moderate" => cx.theme().warning,
-                            _ => cx.theme().muted_foreground,
-                        };
+                } else if let Some(report) = report {
+                    col = col
+                        .child(self.vulnerability_group_header(
+                            "Production",
+                            report.production.len(),
+                            cx,
+                        ))
+                        .child(self.render_advisory_rows(&report.production, "prod", cx));
+                    if report.production.is_empty() {
                         col = col.child(
                             div()
-                                .flex()
+                                .px_3()
+                                .pb_1()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("None in what ships"),
+                        );
+                    }
+
+                    // The dev group starts collapsed: toolchain findings are
+                    // many and rarely what ships.
+                    let dev_open = self.is_open(DEV_VULNERABILITIES, false);
+                    col =
+                        col.child(
+                            h_flex()
+                                .id("node-vuln-dev-header")
+                                .gap_1()
                                 .items_center()
-                                .gap_2()
                                 .px_3()
                                 .py_0p5()
                                 .text_xs()
+                                .cursor_pointer()
+                                .hover(|d| d.bg(cx.theme().list_hover))
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .truncate()
-                                        .font_family("Cascadia Mono")
-                                        .text_color(cx.theme().foreground)
-                                        .child(vuln.package.clone()),
+                                    Icon::new(if dev_open {
+                                        IconName::ChevronDown
+                                    } else {
+                                        IconName::ChevronRight
+                                    })
+                                    .xsmall()
+                                    .text_color(cx.theme().muted_foreground),
                                 )
                                 .child(
                                     div()
-                                        .rounded_md()
-                                        .px_1()
-                                        .py_0p5()
-                                        .bg(severity_color.opacity(0.2))
-                                        .text_color(severity_color)
-                                        .child(vuln.severity.clone()),
-                                ),
+                                        .flex_1()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(cx.theme().foreground)
+                                        .child("Dev dependencies"),
+                                )
+                                .child(Tag::secondary().xsmall().child(
+                                    if report.dev_error.is_some() {
+                                        "?".to_string()
+                                    } else {
+                                        report.dev.len().to_string()
+                                    },
+                                ))
+                                .on_click(cx.listener(|this, _e, _w, cx| {
+                                    // `toggle` treats a section it has not seen as open.
+                                    this.open
+                                        .entry(DEV_VULNERABILITIES.to_string())
+                                        .or_insert(false);
+                                    this.toggle(DEV_VULNERABILITIES, cx);
+                                })),
                         );
-                        if !vuln.title.is_empty() {
+                    if dev_open {
+                        if let Some(error) = &report.dev_error {
+                            col = col.child(
+                                div()
+                                    .px_3()
+                                    .pb_1()
+                                    .text_xs()
+                                    .text_color(cx.theme().danger)
+                                    .child(format!("The dev scan failed: {error}")),
+                            );
+                        } else if report.dev.is_empty() {
                             col = col.child(
                                 div()
                                     .px_3()
                                     .pb_1()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(vuln.title.clone()),
+                                    .child("None in dev dependencies"),
                             );
+                        } else {
+                            col = col.child(self.render_advisory_rows(&report.dev, "dev", cx));
                         }
                     }
                 }
             }
         }
 
+        col
+    }
+
+    fn vulnerability_group_header(
+        &self,
+        title: &str,
+        count: usize,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .gap_1()
+            .items_center()
+            .px_3()
+            .py_0p5()
+            .text_xs()
+            .child(
+                div()
+                    .flex_1()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground)
+                    .child(title.to_string()),
+            )
+            .child(Tag::secondary().xsmall().child(count.to_string()))
+    }
+
+    /// `name [severity]`, one row per advisory. A click opens the Node Package
+    /// Manager tab on its Vulnerabilities page, where the card is.
+    fn render_advisory_rows(
+        &self,
+        advisories: &[AuditAdvisory],
+        group: &'static str,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let mut col = div().flex().flex_col();
+        for (ix, advisory) in advisories.iter().enumerate() {
+            let severity_color = match advisory.severity.as_str() {
+                "critical" | "high" => cx.theme().danger,
+                "moderate" => cx.theme().warning,
+                _ => cx.theme().muted_foreground,
+            };
+            col = col.child(
+                h_flex()
+                    .id((group, ix))
+                    .gap_2()
+                    .items_center()
+                    .px_3()
+                    .py_0p5()
+                    .text_xs()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(cx.theme().list_hover))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family("Cascadia Mono")
+                            .text_color(cx.theme().foreground)
+                            .child(advisory.package.clone()),
+                    )
+                    .child(
+                        div()
+                            .rounded_md()
+                            .px_1()
+                            .py_0p5()
+                            .bg(severity_color.opacity(0.2))
+                            .text_color(severity_color)
+                            .child(advisory.severity.clone()),
+                    )
+                    .on_click(cx.listener(|this, _e, window, cx| {
+                        window.dispatch_action(
+                            Box::new(zed_actions::npm_manager::OpenNpmManager {
+                                path: this.selected_project.clone().map(PathBuf::from),
+                                page: Some(zed_actions::npm_manager::NpmPage::Vulnerabilities),
+                                query: None,
+                            }),
+                            cx,
+                        );
+                    })),
+            );
+        }
         col
     }
 
@@ -3465,10 +3632,10 @@ impl NodePanel {
                             if !root.is_empty() {
                                 // npm_manager_panel::open(root, workspace, window, cx);
                                 window.dispatch_action(
-                                  Box::new(zed_actions::npm_manager::OpenNpmManager {
-                                      path: this.selected_project.clone().map(PathBuf::from),
-                                      ..Default::default()
-                                  }),
+                                    Box::new(zed_actions::npm_manager::OpenNpmManager {
+                                        path: this.selected_project.clone().map(PathBuf::from),
+                                        ..Default::default()
+                                    }),
                                     cx,
                                 );
                             }
